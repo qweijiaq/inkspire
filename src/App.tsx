@@ -56,6 +56,16 @@ export default function App() {
   }, [state.docs])
 
   useEffect(() => {
+    const onRenamed = (event: Event) => {
+      const detail = (event as CustomEvent<{ from: string; to: string }>).detail
+      if (!detail?.from || !detail.to) return
+      setOpenTabs((prev) => prev.map((id) => (id === detail.from ? detail.to : id)))
+    }
+    window.addEventListener('inkspire:doc-renamed', onRenamed)
+    return () => window.removeEventListener('inkspire:doc-renamed', onRenamed)
+  }, [])
+
+  useEffect(() => {
     const onRestored = () => setEpoch((n) => n + 1)
     window.addEventListener('inkspire:vault-restored', onRestored)
     return () => window.removeEventListener('inkspire:vault-restored', onRestored)
@@ -90,6 +100,8 @@ export default function App() {
         else if (s.versionsOpen) vault.setModal({ versionsOpen: false })
         return
       }
+      const s = vault.state
+      if (s.paletteOpen || s.settingsOpen || s.importOpen || s.versionsOpen) return
       if (meta && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         vault.setModal({ paletteOpen: !vault.state.paletteOpen })

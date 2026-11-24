@@ -1,12 +1,27 @@
 use serde::Serialize;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewWindow};
 use walkdir::WalkDir;
 
 const MAX_FILES: usize = 4000;
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+fn ensure_main(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err("这个操作只允许主窗口调用".into())
+    }
+}
+
+/// 同一进程内串行写盘，避免两个命令同时 rename 同一路径。
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize, Clone)]
 pub struct VaultFile {
@@ -22,14 +37,39 @@ pub struct VaultInfo {
     pub files: usize,
 }
 
-fn settings_vault_path(app: &AppHandle) -> Option<PathBuf> {
-    let dir = app.path().app_config_dir().ok()?;
-    let txt = fs::read_to_string(dir.join("settings.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
-    v.get("vaultPath")
+fn settings_vault_path(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("无法定位设置目录: {e}"))?;
+    let file = dir.join("settings.json");
+    if !file.exists() {
+        return Ok(None);
+    }
+    let txt = fs::read_to_string(&file).map_err(|e| format!("读取设置失败: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&txt).map_err(|e| format!("设置文件损坏，已停止写入以避免串库: {e}"))?;
+    Ok(v.get("vaultPath")
         .and_then(|x| x.as_str())
         .filter(|p| !p.trim().is_empty())
-        .map(PathBuf::from)
+        .map(PathBuf::from))
+}
+
+/// 从 root 开始逐段检查，拒绝路径中的符号链接（包括 assets/ 被替换成链接）。
+fn reject_symlinks(root: &Path, rel: &str) -> Result<(), String> {
+    let mut cur = root.to_path_buf();
+    for part in rel.replace('\\', "/").split('/') {
+        if part.is_empty() || part == ".." {
+            return Err("非法路径".into());
+        }
+        cur.push(part);
+        if let Ok(meta) = fs::symlink_metadata(&cur) {
+            if meta.file_type().is_symlink() {
+                return Err("不允许通过符号链接访问 vault 外部".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn read_content(app: &AppHandle, path: &str) -> Result<String, String> {
@@ -39,7 +79,7 @@ pub fn read_content(app: &AppHandle, path: &str) -> Result<String, String> {
 }
 
 pub fn vault_root(app: &AppHandle) -> Result<PathBuf, String> {
-    let root = settings_vault_path(app).unwrap_or_else(|| {
+    let root = settings_vault_path(app)?.unwrap_or_else(|| {
         dirs::document_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Inkspire")
@@ -62,11 +102,13 @@ fn safe_asset_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
             return Err("非法路径".into());
         }
     }
+    reject_symlinks(root, &rel)?;
     Ok(root.join(p))
 }
 
 #[tauri::command]
-pub async fn vault_asset_write(app: AppHandle, path: String, data: Vec<u8>) -> Result<String, String> {
+pub async fn vault_asset_write(window: WebviewWindow, app: AppHandle, path: String, data: Vec<u8>) -> Result<String, String> {
+    ensure_main(&window)?;
     let root = vault_root(&app)?;
     let full = safe_asset_join(&root, &path)?;
     if let Some(parent) = full.parent() {
@@ -77,7 +119,8 @@ pub async fn vault_asset_write(app: AppHandle, path: String, data: Vec<u8>) -> R
 }
 
 #[tauri::command]
-pub async fn vault_asset_read(app: AppHandle, path: String) -> Result<Vec<u8>, String> {
+pub async fn vault_asset_read(window: WebviewWindow, app: AppHandle, path: String) -> Result<Vec<u8>, String> {
+    ensure_main(&window)?;
     let root = vault_root(&app)?;
     let full = safe_asset_join(&root, &path)?;
     fs::read(&full).map_err(|e| format!("读取资源失败: {e}"))
@@ -93,6 +136,7 @@ fn safe_join_dir(root: &Path, rel: &str) -> Result<PathBuf, String> {    let rel
             return Err("非法路径".into());
         }
     }
+    reject_symlinks(root, &rel)?;
     Ok(root.join(p))
 }
 
@@ -109,6 +153,7 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {    let rel = r
     if !rel.to_lowercase().ends_with(".md") {
         return Err("只支持 .md 文件".into());
     }
+    reject_symlinks(root, &rel)?;
     Ok(root.join(p))
 }
 
@@ -125,6 +170,8 @@ fn safe_dir(root: &Path, rel: &str) -> Result<PathBuf, String> {
         }
         out.push(part);
     }
+    let rel = rel.trim_matches('/');
+    reject_symlinks(root, rel)?;
     Ok(out)
 }
 
@@ -148,7 +195,8 @@ pub async fn vault_dirs(app: AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub async fn vault_mkdir(app: AppHandle, path: String) -> Result<String, String> {
+pub async fn vault_mkdir(window: WebviewWindow, app: AppHandle, path: String) -> Result<String, String> {
+    ensure_main(&window)?;
     let root = vault_root(&app)?;
     let full = safe_dir(&root, &path)?;
     fs::create_dir_all(&full).map_err(|e| format!("创建文件夹失败: {e}"))?;
@@ -302,7 +350,8 @@ pub async fn vault_list(app: AppHandle) -> Result<Vec<VaultFile>, String> {
 }
 
 #[tauri::command]
-pub async fn vault_read(app: AppHandle, path: String) -> Result<String, String> {
+pub async fn vault_read(window: WebviewWindow, app: AppHandle, path: String) -> Result<String, String> {
+    ensure_main(&window)?;
     let root = vault_root(&app)?;
     let full = safe_join(&root, &path)?;
     fs::read_to_string(full).map_err(|e| format!("读取失败: {e}"))
@@ -316,20 +365,38 @@ pub struct WriteResult {
 }
 
 #[tauri::command]
-pub async fn vault_write(app: AppHandle, path: String, content: String) -> Result<WriteResult, String> {
+pub async fn vault_write(window: WebviewWindow, app: AppHandle, path: String, content: String) -> Result<WriteResult, String> {
+    ensure_main(&window)?;
     let root = vault_root(&app)?;
     let full = safe_join(&root, &path)?;
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
     }
-    // 原子写：先写临时文件再 rename，断电不丢已提交内容
-    let tmp = full.with_extension("md.tmp");
-    fs::write(&tmp, content.as_bytes()).map_err(|e| format!("写入失败: {e}"))?;
+    // 原子写：唯一临时名 + 进程内串行，避免并发保存互相覆盖 tmp。
+    let _guard = WRITE_LOCK.lock().map_err(|_| "写盘锁已损坏".to_string())?;
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = full.with_extension(format!("md.{stamp}.{seq}.tmp"));
+    // create_new 拒绝已存在的路径，避免临时名被预先替换成符号链接。
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("创建临时文件失败: {e}"))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| format!("写入失败: {e}"))?;
+    file.sync_all().map_err(|e| format!("刷盘失败: {e}"))?;
+    drop(file);
     fs::rename(&tmp, &full).map_err(|e| format!("保存失败: {e}"))?;
     let meta = fs::metadata(&full).map_err(|e| e.to_string())?;
     let modified = modified_ms(&meta);
-    // 同步全文索引（失败不影响写盘）
-    let _ = crate::index::upsert_doc(&app, &path, &content, modified);
+    // 同步全文索引（失败不影响写盘，但必须留日志，不能静默落后）
+    if let Err(e) = crate::index::upsert_doc(&app, &path, &content, modified) {
+        eprintln!("[index] upsert failed for {path}: {e}");
+    }
     Ok(WriteResult {
         path,
         modified,
@@ -338,17 +405,21 @@ pub async fn vault_write(app: AppHandle, path: String, content: String) -> Resul
 }
 
 #[tauri::command]
-pub async fn vault_delete(app: AppHandle, path: String) -> Result<(), String> {
+pub async fn vault_delete(window: WebviewWindow, app: AppHandle, path: String) -> Result<(), String> {
+    ensure_main(&window)?;
     let root = vault_root(&app)?;
     let full = safe_join(&root, &path)?;
     fs::remove_file(full).map_err(|e| format!("删除失败: {e}"))?;
-    let _ = crate::index::remove_doc(&app, &path);
+    if let Err(e) = crate::index::remove_doc(&app, &path) {
+        eprintln!("[index] remove failed for {path}: {e}");
+    }
     crate::doc::forget(&path);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn vault_rename(app: AppHandle, from: String, to: String) -> Result<(), String> {
+pub async fn vault_rename(window: WebviewWindow, app: AppHandle, from: String, to: String) -> Result<(), String> {
+    ensure_main(&window)?;
     let root = vault_root(&app)?;
     let src = safe_join(&root, &from)?;
     let dst = safe_join(&root, &to)?;
@@ -359,17 +430,51 @@ pub async fn vault_rename(app: AppHandle, from: String, to: String) -> Result<()
         fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
     }
     fs::rename(&src, &dst).map_err(|e| format!("重命名失败: {e}"))?;
-    let _ = crate::index::remove_doc(&app, &from);
+    if let Err(e) = crate::index::remove_doc(&app, &from) {
+        eprintln!("[index] remove failed for {from}: {e}");
+    }
     crate::doc::forget(&from);
     if let Ok(content) = fs::read_to_string(&dst) {
         let modified = fs::metadata(&dst).map(|m| modified_ms(&m)).unwrap_or(0);
-        let _ = crate::index::upsert_doc(&app, &to, &content, modified);
+        if let Err(e) = crate::index::upsert_doc(&app, &to, &content, modified) {
+            eprintln!("[index] upsert failed for {to}: {e}");
+        }
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn vault_rename_dir(app: AppHandle, from: String, to: String) -> Result<(), String> {
+pub async fn vault_delete_dir(window: WebviewWindow, app: AppHandle, path: String) -> Result<(), String> {
+    ensure_main(&window)?;
+    let root = vault_root(&app)?;
+    let rel = path.trim_matches('/').replace('\\', "/");
+    if rel.is_empty() || rel.split('/').any(|p| p.is_empty() || p == ".." || p.starts_with('.')) {
+        return Err("非法文件夹路径".into());
+    }
+    let src = safe_dir(&root, &rel)?;
+    if !src.exists() {
+        return Ok(());
+    }
+    // 删除文件夹采用归档，不直接 remove_dir_all：用户误删时还能从 .trash 找回。
+    let name = src.file_name().and_then(|x| x.to_str()).unwrap_or("folder");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let archive_root = root.join(".trash").join("folders");
+    fs::create_dir_all(&archive_root).map_err(|e| format!("创建归档目录失败: {e}"))?;
+    let archive = archive_root.join(format!("{stamp}-{name}"));
+    fs::rename(&src, &archive).map_err(|e| format!("归档文件夹失败: {e}"))?;
+    if let Err(e) = crate::index::remove_prefix(&app, &rel) {
+        eprintln!("[index] remove_prefix failed for {rel}: {e}");
+    }
+    crate::doc::forget_prefix(&rel);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn vault_rename_dir(window: WebviewWindow, app: AppHandle, from: String, to: String) -> Result<(), String> {
+    ensure_main(&window)?;
     let root = vault_root(&app)?;
     let src = safe_join_dir(&root, &from)?;
     let dst = safe_join_dir(&root, &to)?;
@@ -389,7 +494,8 @@ pub async fn vault_rename_dir(app: AppHandle, from: String, to: String) -> Resul
 }
 
 #[tauri::command]
-pub async fn vault_reveal(app: AppHandle) -> Result<(), String> {
+pub async fn vault_reveal(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    ensure_main(&window)?;
     let root = vault_root(&app)?;
     #[cfg(target_os = "macos")]
     {

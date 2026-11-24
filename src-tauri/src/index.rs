@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Clone)]
@@ -20,6 +21,8 @@ fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn connect(app: &AppHandle) -> Result<Connection, String> {
     let conn = Connection::open(db_path(app)?).map_err(|e| format!("打开索引失败: {e}"))?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| format!("设置索引超时失败: {e}"))?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          CREATE TABLE IF NOT EXISTS docs (
@@ -87,6 +90,10 @@ fn strip_front_matter(content: &str) -> &str {
 }
 
 pub fn upsert_doc(app: &AppHandle, path: &str, content: &str, modified: i64) -> Result<(), String> {
+    // 归档目录不参与搜索，避免旧种子文档又被搜出来。
+    if path.starts_with(".trash/") {
+        return Ok(());
+    }
     let title = guess_title(path, content);
     let body = strip_front_matter(content).to_string();
     let mut conn = connect(app)?;
@@ -121,11 +128,21 @@ pub fn remove_doc(app: &AppHandle, path: &str) -> Result<(), String> {
 pub fn remove_prefix(app: &AppHandle, prefix: &str) -> Result<(), String> {
     let mut conn = connect(app)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let like = format!("{prefix}/%");
-    tx.execute("DELETE FROM docs WHERE path = ?1 OR path LIKE ?2", params![prefix, like])
-        .map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM docs_fts WHERE path = ?1 OR path LIKE ?2", params![prefix, like])
-        .map_err(|e| e.to_string())?;
+    let escaped = prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let like = format!("{escaped}/%");
+    tx.execute(
+        "DELETE FROM docs WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+        params![prefix, like],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM docs_fts WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+        params![prefix, like],
+    )
+    .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 

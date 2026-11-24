@@ -9,7 +9,7 @@ import { NumberField } from './ui/NumberField'
 import { SuggestionInput } from './ui/SuggestionInput'
 import { confirmDialog } from '../lib/dialog'
 import { isTauri, platform } from '../lib/platform'
-import type { AppSettings, AISettings, ProviderId } from '../types'
+import type { AppSettings, AISettings, ProviderId, QiniuSettings } from '../types'
 import { addMemory, removeMemory, useMemories } from '../lib/memories'
 import { useDialogA11y } from './ui/useDialogA11y'
 import { Icon } from './ui/Icon'
@@ -24,6 +24,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [vaultPath, setVaultPath] = useState(s.vaultPath || state.vaultRoot || '')
   const [memoryText, setMemoryText] = useState('')
   const [section, setSection] = useState('appearance')
+  const [qiniu, setQiniu] = useState<QiniuSettings>(s.qiniu)
+  const [qiniuSecret, setQiniuSecret] = useState('')
+  const [qiniuBusy, setQiniuBusy] = useState(false)
+  const [qiniuProgress, setQiniuProgress] = useState('')
   const memories = useMemories()
   const [modelsError, setModelsError] = useState<string | null>(null)
   const modalRef = useRef<HTMLDivElement | null>(null)
@@ -155,6 +159,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               ['ai', 'AI'],
               ['memory', '记忆'],
               ['data', '数据'],
+              ['qiniu', '七牛云'],
               ['about', '关于'],
             ].map(([id, label]) => (
               <button
@@ -494,8 +499,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 onChange={(e) => setMemoryText(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    addMemory(memoryText)
-                    setMemoryText('')
+                    if (addMemory(memoryText)) setMemoryText('')
                   }
                 }}
                 placeholder="例如：解释概念时先给一句话结论"
@@ -505,10 +509,119 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 className="tbtn"
                 type="button"
                 disabled={!memoryText.trim()}
-                onClick={() => { addMemory(memoryText); setMemoryText('') }}
+                onClick={() => { if (addMemory(memoryText)) setMemoryText('') }}
               >
                 添加
               </button>
+            </div>
+          </div>
+
+          <div className={`settings-group${section === 'qiniu' ? ' on' : ''}`} data-section="qiniu">
+            <h4>七牛云图床</h4>
+            <div className={`switch${qiniu.enabled ? ' on' : ''}`} {...toggle(qiniu.enabled, () => setQiniu({ ...qiniu, enabled: !qiniu.enabled }))}>
+              <span>自动上传图片</span>
+              <span className="sw" />
+            </div>
+            <div className="hint">开启后，新插入的封面图会直接上传；也可以手动把库里已有的图片全部迁移过去。</div>
+            <div className="row-flex" style={{ gap: 10, alignItems: 'flex-start' }}>
+              <div className="field" style={{ flex: 1, minWidth: 0, marginBottom: 10 }}>
+                <label>AccessKey</label>
+                <input className="settings-input" value={qiniu.accessKey} onChange={(e) => setQiniu({ ...qiniu, accessKey: e.target.value })} placeholder="七牛 AccessKey" autoComplete="off" />
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: 0, marginBottom: 10 }}>
+                <label>SecretKey</label>
+                <input className="settings-input" type="password" value={qiniuSecret} onChange={(e) => setQiniuSecret(e.target.value)} placeholder={qiniu.secretSet ? '已保存，留空不覆盖' : '七牛 SecretKey'} autoComplete="new-password" />
+              </div>
+            </div>
+            <div className="hint" style={{ marginTop: -4, marginBottom: 10 }}>SecretKey 只写入系统钥匙串，不进入设置文件或备份。</div>
+            <div className="row-flex" style={{ gap: 10, alignItems: 'flex-start' }}>
+              <div className="field" style={{ flex: 1, minWidth: 0, marginBottom: 10 }}>
+                <label>Bucket</label>
+                <input className="settings-input" value={qiniu.bucket} onChange={(e) => setQiniu({ ...qiniu, bucket: e.target.value })} placeholder="inkspire-assets" />
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: 0, marginBottom: 10 }}>
+                <label>Domain</label>
+                <input className="settings-input" value={qiniu.domain} onChange={(e) => setQiniu({ ...qiniu, domain: e.target.value })} placeholder="https://cdn.example.com" />
+              </div>
+            </div>
+            <div className="hint" style={{ marginTop: -4, marginBottom: 10 }}>域名会自动补 https://；图片按「前缀/年/月/时间-文件名」保存。</div>
+            <div className="row-flex" style={{ gap: 10 }}>
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label>路径前缀</label>
+                <input className="settings-input" value={qiniu.prefix} onChange={(e) => setQiniu({ ...qiniu, prefix: e.target.value })} placeholder="inkspire/images" />
+              </div>
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label>区域</label>
+                <Select value={qiniu.zone} onChange={(zone) => setQiniu({ ...qiniu, zone })} options={[
+                  { value: 'z0', label: '华东 z0' },
+                  { value: 'z1', label: '华北 z1' },
+                  { value: 'z2', label: '华南 z2' },
+                  { value: 'na0', label: '北美 na0' },
+                  { value: 'as0', label: '东南亚 as0' },
+                  { value: 'cn-east-2', label: '华东二 cn-east-2' },
+                ]} ariaLabel="七牛区域" />
+              </div>
+            </div>
+            <div className="row-flex" style={{ marginTop: 14 }}>
+              <button
+                className="tbtn primary"
+                type="button"
+                disabled={qiniuBusy}
+                onClick={async () => {
+                  if (!isTauri) {
+                    vault.flash('七牛图床需要桌面版；浏览器预览不支持读取钥匙串', 'error')
+                    return
+                  }
+                  setQiniuBusy(true)
+                  try {
+                    if (qiniuSecret.trim()) await platform.secretSet('qiniu-sk', qiniuSecret.trim())
+                    const secretSet = qiniuSecret.trim() ? true : qiniu.secretSet
+                    await vault.updateSettings({ qiniu: { ...qiniu, secretSet } })
+                    setQiniu({ ...qiniu, secretSet })
+                    setQiniuSecret('')
+                    vault.flash('七牛配置已保存', 'success')
+                  } catch (e: any) {
+                    vault.flash(`保存七牛配置失败：${e?.message ?? e}`, 'error')
+                  } finally {
+                    setQiniuBusy(false)
+                  }
+                }}
+              >
+                保存七牛配置
+              </button>
+              <button
+                className="tbtn"
+                type="button"
+                disabled={qiniuBusy}
+                onClick={async () => {
+                  if (!isTauri) {
+                    vault.flash('七牛图床需要桌面版', 'error')
+                    return
+                  }
+                  setQiniuBusy(true)
+                  setQiniuProgress('准备上传…')
+                  try {
+                    if (qiniuSecret.trim()) await platform.secretSet('qiniu-sk', qiniuSecret.trim())
+                    const secretSet = qiniuSecret.trim() ? true : qiniu.secretSet
+                    await vault.updateSettings({ qiniu: { ...qiniu, secretSet } })
+                    setQiniu({ ...qiniu, secretSet })
+                    setQiniuSecret('')
+                    await vault.uploadAllImagesToQiniu((done, total) => setQiniuProgress(`上传中 ${done}/${total}`))
+                    setQiniuProgress('')
+                  } catch (e: any) {
+                    vault.flash(`上传失败：${e?.message ?? e}`, 'error')
+                    setQiniuProgress('')
+                  } finally {
+                    setQiniuBusy(false)
+                  }
+                }}
+              >
+                上传全部图片
+              </button>
+              {qiniuProgress && <span className="hint">{qiniuProgress}</span>}
+            </div>
+            <div className="settings-note">
+              Key 存在系统钥匙串；图片上传到 Bucket 后按「Domain/前缀/年/月/时间-文件名」生成公开 URL。失败会保留本地 assets，不影响正文。
             </div>
           </div>
 

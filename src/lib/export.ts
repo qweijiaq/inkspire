@@ -29,8 +29,16 @@ function splitChapters(body: string, fallbackTitle: string): { title: string; te
   const chapters: { title: string; text: string }[] = []
   let current: { title: string; lines: string[] } | null = null
   let preamble: string[] = []
+  let fence: string | null = null
   for (const line of lines) {
-    const h2 = line.match(/^##\s+(.+)$/)
+    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/)
+    if (fenceMatch) {
+      const mark = fenceMatch[1][0]
+      if (!fence) fence = mark
+      else if (mark === fence) fence = null
+    }
+    // 代码块里的 ## 不是章节标题；否则 EPUB 会把代码从中间切开。
+    const h2 = fence ? null : line.match(/^##\s+(.+)$/)
     if (h2) {
       if (current) chapters.push({ title: current.title, text: current.lines.join('\n') })
       current = { title: h2[1].trim(), lines: [] }
@@ -121,12 +129,19 @@ export function buildHtml(doc: Document, forPrint = false): string {
 }
 
 async function inlineAssets(html: string): Promise<string> {
-  const paths = [...new Set([...html.matchAll(/<img[^>]+src="(assets\/[^"]+)"/g)].map((m) => m[1]))]
+  const sources = [...new Set([...html.matchAll(/<img[^>]+src="([^"]+)"/g)].map((m) => m[1]))]
   let out = html
-  for (const path of paths) {
+  for (const src of sources) {
+    let path = src.replace(/^\.?\//, '')
+    try {
+      path = decodeURIComponent(path)
+    } catch {
+      /* 保留原路径 */
+    }
+    if (!path.startsWith('assets/')) continue
     const data = await assetDataUrl(path)
     if (!data) continue
-    out = out.split(`src="${path}"`).join(`src="${data}"`)
+    out = out.split(`src="${src}"`).join(`src="${data}"`)
   }
   return out
 }

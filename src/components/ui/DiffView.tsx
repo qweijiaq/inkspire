@@ -10,7 +10,9 @@ interface Props {
 
 /** 审阅用 diff：相同行降噪，改动行配对并做行内词级高亮 */
 export function DiffView({ before, after, className = '', maxRows = 500 }: Props) {
-  const rows: ReviewRow[] = useMemo(() => diffReview(before, after, maxRows), [before, after, maxRows])
+  const safeBefore = useMemo(() => before.replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '[本地图片]'), [before])
+  const safeAfter = useMemo(() => after.replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '[本地图片]'), [after])
+  const rows: ReviewRow[] = useMemo(() => diffReview(safeBefore, safeAfter, maxRows), [safeBefore, safeAfter, maxRows])
   return (
     <pre className={`diff-view ${className}`.trim()} aria-label="逐行 diff">
       {rows.map((row: ReviewRow, i: number) => {

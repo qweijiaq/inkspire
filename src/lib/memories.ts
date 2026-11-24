@@ -18,21 +18,26 @@ export function loadMemories(): MemoryFact[] {
   }
 }
 
-function save(next: MemoryFact[]) {
-  localStorage.setItem(KEY, JSON.stringify(next.slice(0, 50)))
-  window.dispatchEvent(new CustomEvent('inkspire:memories'))
+function save(next: MemoryFact[]): boolean {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(next.slice(0, 50)))
+    window.dispatchEvent(new CustomEvent('inkspire:memories'))
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function addMemory(text: string) {
   const clean = text.trim()
   if (!clean) return null
   const fact: MemoryFact = { id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`, text: clean.slice(0, 300), createdAt: Date.now() }
-  save([fact, ...loadMemories()])
+  if (!save([fact, ...loadMemories()])) return null
   return fact
 }
 
 export function removeMemory(id: string) {
-  save(loadMemories().filter((m) => m.id !== id))
+  return save(loadMemories().filter((m) => m.id !== id))
 }
 
 export function useMemories() {

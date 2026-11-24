@@ -205,8 +205,25 @@ const SLASH_ITEMS: SlashItem[] = [
   { icon: 'book', label: '打开今日笔记', hint: '/daily', keys: 'daily 今日 日记 笔记', action: 'daily' },
 ]
 
+/** 润色时把图片换成短占位符，避免 base64/data URI 被模型截断或改写。 */
+function protectImagesForPolish(body: string): { text: string; images: { token: string; markdown: string }[] } {
+  const images: { token: string; markdown: string }[] = []
+  const text = body.replace(/!\[[^\]]*\]\([^)\n]+\)/g, (markdown) => {
+    const token = `[[INKSPIRE_IMAGE_${images.length + 1}]]`
+    images.push({ token, markdown })
+    return token
+  })
+  return { text, images }
+}
+
+function restoreImagesAfterPolish(text: string, images: { token: string; markdown: string }[]): string {
+  let out = text
+  for (const image of images) out = out.split(image.token).join(image.markdown)
+  return out
+}
+
 /** 长文在内部按段落切片润色；不限制用户输入，也不要求用户手动分章 */
-function splitBodyForPolish(body: string, maxChars = 9000): string[] {
+function splitBodyForPolish(body: string, maxChars = 6000): string[] {
   const lines = body.split('\n')
   const chunks: string[] = []
   let buf: string[] = []
@@ -357,6 +374,36 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
     [settings.theme],
   )
 
+  // 标题行隐藏了 # 标记且注册了 atomicRanges；默认 Backspace 在空标题/边界处
+  // 可能把整行当成一个原子块删掉。标题正文内明确只删一个字符。
+  const deleteHeadingCharBackward = (view: EditorView) => {
+    const sel = view.state.selection.main
+    if (!sel.empty) return false
+    const line = view.state.doc.lineAt(sel.head)
+    const marker = line.text.match(/^#{1,6}\s+/)?.[0].length ?? 0
+    if (!marker) return false
+    const offset = sel.head - line.from
+    if (offset <= marker) return false
+    view.dispatch({
+      changes: { from: sel.head - 1, to: sel.head },
+      selection: { anchor: sel.head - 1 },
+      userEvent: 'delete',
+    })
+    return true
+  }
+
+  const guardFrontMatterDeletion = (view: EditorView) => {
+    const sel = view.state.selection.main
+    if (!sel.empty) return false
+    const line = view.state.doc.lineAt(sel.head)
+    const offset = sel.head - line.from
+    if (offset !== 0) return false
+    const fm = parseFrontMatter(view.state.doc.toString())
+    if (fm.bodyLineOffset <= 0 || line.number !== fm.bodyLineOffset + 1) return false
+    // 正文第一行行首永远不能退格到隐藏的 Front Matter（包括标题行本身）。
+    return true
+  }
+
   const buildExtensions = useCallback(
     (_text: string) =>
       [
@@ -373,6 +420,8 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
               return true
             },
           },
+          { key: 'Backspace', run: guardFrontMatterDeletion },
+          { key: 'Backspace', run: deleteHeadingCharBackward },
           ...markdownKeymap,
           ...defaultKeymap,
           ...historyKeymap,
@@ -584,13 +633,21 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
     viewRef.current = view
     vault.discardPending = false
     if (import.meta.env.DEV) (window as any).__cmView = view
+    // Front Matter 在阅读态收起；初始光标不能停在隐藏的元数据里。
+    const fmInfo = parseFrontMatter(initial)
+    if (fmInfo.bodyLineOffset > 0) {
+      const targetLine = Math.min(view.state.doc.lines, fmInfo.bodyLineOffset + 1)
+      const target = view.state.doc.line(targetLine).from
+      view.dispatch({ selection: { anchor: target } })
+    }
     lastSaved.current = doc.content
     setSavedAt(doc.updatedAt)
     setEmpty(isBlankBody(initial))
     dirtyRef.current = false
     setDirty(false)
     const lines = doc.content.split('\n').length
-    setCursor({ line: 1, col: 1, chars: doc.content.length })
+    const initialLine = fmInfo.bodyLineOffset > 0 ? Math.min(view.state.doc.lines, fmInfo.bodyLineOffset + 1) : 1
+    setCursor({ line: initialLine, col: 1, chars: doc.content.length })
     void lines
     const onPointerDown = () => {
       selectingRef.current = true
@@ -637,9 +694,10 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
     view.focus()
     if (isTauri) {
       rustRev.current = 0
-      void platform
-        .docOpen(doc.path)
-        .then((snap) => {
+      // doc_open 必须先于第一批 doc_apply 完成；否则 base_revision=0 会把 patch 应用到旧 rope。
+      rustQueue.current = rustQueue.current
+        .then(async () => {
+          const snap = await platform.docOpen(doc.path)
           rustRev.current = snap.revision
           vault.setBlocks(doc.path, snap.blocks)
         })
@@ -752,6 +810,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
   // 表格卡片：CM 会吞掉 widget 内的鼠标事件，这里在 document 捕获阶段接管
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
+      if (e.button !== 0 || e.ctrlKey) return
       const target = e.target as HTMLElement
       const toc = target?.closest?.('.cm-md-toc-item') as HTMLElement | null
       if (toc?.dataset.line) {
@@ -883,12 +942,16 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
       instruction,
     )
     abortRef.current?.abort()
+    if (deltaRaf.current) cancelAnimationFrame(deltaRaf.current)
+    deltaRaf.current = 0
+    deltaBuf.current = ''
     const controller = new AbortController()
     abortRef.current = controller
     vault.setAiBusy(true)
     vault.pet('thinking', '让我想想…', 0)
+    const runId = String(Date.now())
     setSuggestion({
-      id: String(Date.now()),
+      id: runId,
       mode: mode as AISuggestion['mode'],
       title: MODE_LABEL[mode] ?? '建议',
       text: '',
@@ -906,22 +969,33 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
             deltaRaf.current = 0
             const chunk = deltaBuf.current
             deltaBuf.current = ''
-            if (!chunk) return
-            setSuggestion((s) => (s ? { ...s, text: s.text + chunk } : s))
+            if (!chunk || controller.signal.aborted) return
+            setSuggestion((s) => (s && s.id === runId ? { ...s, text: s.text + chunk } : s))
           })
         }
       }, controller.signal, { cache: !opts.fresh })
-      vault.recordUsage(inputChars, text.length)
-      setSuggestion((s) => (s ? { ...s, streaming: false } : s))
-      vault.setAiBusy(false)
-      vault.pet('happy', '写好啦，看看合不合心意', 2400)
+      if (!controller.signal.aborted) {
+        vault.recordUsage(inputChars, text.length)
+        setSuggestion((s) => (s && s.id === runId ? { ...s, streaming: false } : s))
+        vault.pet('happy', '写好啦，看看合不合心意', 2400)
+      }
+      if (abortRef.current === controller) {
+        abortRef.current = null
+        vault.setAiBusy(false)
+      }
     } catch (e: any) {
       if (e?.name === 'AbortError') {
-        vault.setAiBusy(false)
+        if (abortRef.current === controller) {
+          abortRef.current = null
+          vault.setAiBusy(false)
+        }
         return
       }
-      setSuggestion((s) => (s ? { ...s, streaming: false, error: e?.message ?? String(e) } : s))
-      vault.setAiBusy(false)
+      setSuggestion((s) => (s && s.id === runId ? { ...s, streaming: false, error: e?.message ?? String(e) } : s))
+      if (abortRef.current === controller) {
+        abortRef.current = null
+        vault.setAiBusy(false)
+      }
       vault.pet('surprised', '诶？！出错了', 2400)
     }
   }
@@ -957,8 +1031,9 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
       vault.flash('正文为空，没有可润色的内容', 'info')
       return
     }
-    const chunks = splitBodyForPolish(body)
-    if (!vault.checkAiBudget(body.length + chunks.length * 700)) return
+    const protectedBody = protectImagesForPolish(body)
+    const chunks = splitBodyForPolish(protectedBody.text)
+    if (!vault.checkAiBudget(protectedBody.text.length + chunks.length * 700)) return
     const readyAi = vault.state.settings.ai
     abortRef.current?.abort()
     const controller = new AbortController()
@@ -970,7 +1045,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
       mode: 'rewrite',
       title: '全文润色排版',
       text: '',
-      original: body,
+      original: protectedBody.text,
       streaming: true,
       range: { from: full.length - body.length, to: full.length },
       sources: [{ docId: doc.id, title: doc.title, line: 0, excerpt: '整篇正文' }],
@@ -994,7 +1069,12 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
           budget,
         })
         const before = acc.length
-        await streamChat(readyAi, messages, push, controller.signal, { cache: false })
+        // 全文润色的输出可能和输入一样长；默认 1200 token 会把长文截断
+        const chunkAi = {
+          ...readyAi,
+          maxTokens: Math.max(readyAi.maxTokens, Math.min(8192, Math.ceil(chunks[i].length * 0.9) + 600)),
+        }
+        await streamChat(chunkAi, messages, push, controller.signal, { cache: false })
         if (controller.signal.aborted) return
         vault.recordUsage(JSON.stringify(messages).length, Math.max(0, acc.length - before))
         if (i < chunks.length - 1) {
@@ -1003,7 +1083,26 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
           vault.pet('thinking', `已经处理 ${i + 1}/${chunks.length} 段…`, 0)
         }
       }
-      setSuggestion((s) => (s ? { ...s, streaming: false } : s))
+      const missing = protectedBody.images.filter((image) => !acc.includes(image.token))
+      const restored = restoreImagesAfterPolish(acc, protectedBody.images) + (missing.length ? `\n\n${missing.map((image) => image.markdown).join('\n\n')}` : '')
+      if (missing.length) {
+        // 模型丢占位符时宁可把图片补在末尾，也不能让图片从正文里消失。
+        vault.flash(`AI 输出丢了 ${missing.length} 张图片，已补到文末，请检查位置`, 'error')
+      }
+      const tooShort = body.length > 200 && restored.length < body.length * 0.5
+      if (tooShort) {
+        vault.flash('AI 输出明显短于原文，可能被截断；已阻止采纳，请重试或分段处理', 'error')
+      }
+      setSuggestion((s) =>
+        s
+          ? {
+              ...s,
+              text: restored,
+              streaming: false,
+              error: tooShort ? 'AI 输出明显短于原文（可能被截断或压缩），已阻止采纳。请重试，或调大模型输出上限。' : undefined,
+            }
+          : s,
+      )
       vault.setAiBusy(false)
       vault.pet('happy', '全文排好了，确认 diff 再采纳', 2600)
     } catch (e: any) {
@@ -1199,12 +1298,15 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
   runDocumentPlanRef.current = runDocumentPlan
 
   const coverAbort = useRef<AbortController | null>(null)
+  const coverBusy = useRef(false)
   const requestCover = async (prompt: string, reference?: string, keep = false) => {
     const view = viewRef.current
     if (!view) return
     const readyAi = vault.state.settings.ai
     const model = readyAi.imageModel || defaultImageModel(readyAi.provider)
     if (!model) throw new Error('当前服务商没有配置封面生图模型')
+    if (coverBusy.current) return
+    coverBusy.current = true
     coverAbort.current?.abort()
     const controller = new AbortController()
     coverAbort.current = controller
@@ -1263,6 +1365,8 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
     } catch (e: any) {
       if (e?.name === 'AbortError') return
       setCover((prev) => (keep && prev && (prev.dataUrl || prev.url) ? { ...prev, loading: false, error: e?.message ?? String(e) } : { error: e?.message ?? String(e) }))
+    } finally {
+      if (coverAbort.current === controller) coverBusy.current = false
     }
   }
 
@@ -1367,8 +1471,9 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
     try {
       const blob = cover.blob ?? (cover.url ? await fetch(cover.url).then((r) => r.blob()) : null)
       if (!blob) throw new Error('没有可保存的图片')
-      const path = `assets/covers/cover-${Date.now()}.png`
-      await saveAsset(path, blob)
+      const localPath = `assets/covers/cover-${Date.now()}.png`
+      await saveAsset(localPath, blob)
+      const path = await vault.publishImage(localPath, blob)
       const view = viewRef.current
       if (!view) return
       const full = view.state.doc.toString()
@@ -1618,6 +1723,16 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
     return () => window.removeEventListener('keydown', onKey)
   }, [aiMenu])
 
+  const discardSuggestion = () => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    if (deltaRaf.current) cancelAnimationFrame(deltaRaf.current)
+    deltaRaf.current = 0
+    deltaBuf.current = ''
+    setSuggestion(null)
+    vault.setAiBusy(false)
+  }
+
   const acceptSuggestion = () => {
     const view = viewRef.current
     if (!view || !suggestion) return
@@ -1627,9 +1742,19 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
     const full = view.state.doc.toString()
     const beforeAi = full
     const bodyStart = full.length - parseFrontMatter(full).body.length
-    if ((suggestion.mode === 'rewrite' || suggestion.mode === 'translate') && range && range.to <= bodyStart) {
-      vault.flash('建议不能写进 Front Matter，请把光标移到正文再试', 'error')
+    if (range && (range.from < 0 || range.to < range.from || range.from > full.length || range.to > full.length)) {
+      vault.flash('生成建议后文档已改动，建议的选区失效；请重新生成', 'error')
       return
+    }
+    if ((suggestion.mode === 'rewrite' || suggestion.mode === 'translate') && range) {
+      if (range.to <= bodyStart) {
+        vault.flash('建议不能写进 Front Matter，请把光标移到正文再试', 'error')
+        return
+      }
+      if (suggestion.original && full.slice(range.from, range.to) !== suggestion.original) {
+        vault.flash('生成建议后选区内容已改动，已停止写入以免覆盖新内容', 'error')
+        return
+      }
     }
     if (suggestion.mode === 'rewrite' && range) {
       const from = Math.max(bodyStart, range.from)
@@ -1640,7 +1765,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
     } else {
       // 总结固定追加到末尾；续写/自定义落在光标处，光标在 Front Matter 时退到正文末尾
       const cursor = range?.from ?? view.state.selection.main.head
-      const at = suggestion.mode === 'summarize' || cursor < bodyStart ? view.state.doc.length : cursor
+      const at = suggestion.mode === 'summarize' || cursor < bodyStart || cursor > full.length ? view.state.doc.length : cursor
       const block = suggestion.mode === 'summarize' ? `\n\n${text}\n\n` : `\n\n${text}`
       view.dispatch({ changes: { from: at, insert: block }, selection: { anchor: at + block.length } })
     }
@@ -1722,7 +1847,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
       }}
       onKeyDown={(e) => {
         if (e.key !== 'Escape') return
-        if (suggestion) setSuggestion(null)
+        if (suggestion) discardSuggestion()
         else if (aiMenu) {
           setAiMenu(false)
           aiBtnRef.current?.focus()
@@ -1886,7 +2011,11 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
           draft={cardDraft}
           onClose={() => setCardDraft(null)}
           onSave={(question, answer) => {
-            addCard({ docId: cardDraft.docId, docTitle: cardDraft.docTitle, question, answer, source: cardDraft.source })
+            const card = addCard({ docId: cardDraft.docId, docTitle: cardDraft.docTitle, question, answer, source: cardDraft.source })
+            if (!card) {
+              vault.flash('复习卡保存失败：本机存储空间不足，请先清理浏览器数据', 'error')
+              return
+            }
             setCardDraft(null)
             vault.pet('happy', '记住啦，之后我会来考你 ✦', 2600)
             vault.flash('已加入复习卡', 'success')
@@ -1986,7 +2115,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
             <button className="tbtn primary" disabled={suggestion.streaming || !suggestion.text.trim() || !!suggestion.error} onClick={acceptSuggestion}>
               <Icon name="check" size={15} /> 采纳
             </button>
-            <button className="tbtn" onClick={() => setSuggestion(null)}>丢弃</button>
+            <button className="tbtn" onClick={discardSuggestion}>丢弃</button>
             <button
               className="tbtn ghost"
               onClick={() => {

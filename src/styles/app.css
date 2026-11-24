@@ -7036,8 +7036,11 @@ button svg,
 }
 
 /* 文件树拖动排序 */
-.tree-row[draggable='true'] {
+.tree-row[data-doc-id] {
   cursor: grab;
+}
+.tree-row[data-doc-id]:active {
+  cursor: grabbing;
 }
 .tree-row.dragging {
   opacity: 0.45;
@@ -7057,4 +7060,67 @@ button svg,
   background: var(--brand-soft);
   outline: 1.5px dashed var(--brand);
   outline-offset: -2px;
+}
+
+/* Front Matter 在阅读态收起；源码模式仍可编辑 */
+.cm-md-frontmatter-hidden {
+  height: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  line-height: 0;
+}
+
+/* 图片与图注统一居中；AI 润色可能输出 HTML img，也要兜住 */
+.cm-line:has(> img:not(.cm-widgetBuffer)),
+.cm-line:has(> .cm-md-image) {
+  text-align: center;
+}
+.cm-line > img:not(.cm-widgetBuffer),
+.cm-md-image img {
+  display: block;
+  max-width: min(100%, 720px);
+  max-height: 520px;
+  margin: 10px auto;
+  border: 2.5px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+}
+.cm-line > em:only-child,
+.cm-md-image-alt,
+.cm-md-figure figcaption,
+figcaption {
+  display: block;
+  margin: 4px auto 12px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+
+/* 七牛配置表单：字段占满弹窗宽度 */
+.settings-group[data-section='qiniu'] .field > .settings-input {
+  width: 100%;
+  flex: none;
+}
+.settings-group[data-section='qiniu'] .field > .ui-select {
+  width: 100%;
+}
+
+/* macOS WebView 需要显式允许文件树行被拖动 */
+
+
+.cm-line figure {
+  margin: 10px auto;
+  text-align: center;
+}
+.cm-line figure img:not(.cm-widgetBuffer) {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto 6px;
+}
+
+body.tree-dragging {
+  user-select: none;
 }

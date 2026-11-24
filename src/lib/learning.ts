@@ -43,9 +43,15 @@ function read(): LearningState {
   }
 }
 
-function write(state: LearningState) {
-  localStorage.setItem(KEY, JSON.stringify(state))
-  window.dispatchEvent(new CustomEvent('inkspire:learning'))
+function write(state: LearningState): boolean {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(state))
+    window.dispatchEvent(new CustomEvent('inkspire:learning'))
+    return true
+  } catch {
+    // 配额/无痕模式下 setItem 会抛错，不能让事件处理器静默崩溃。
+    return false
+  }
 }
 
 function touchStudy(state: LearningState): LearningState {
@@ -60,7 +66,7 @@ export function loadLearning(): LearningState {
 
 export function recordStudy() {
   const state = read()
-  write(touchStudy(state))
+  return write(touchStudy(state))
 }
 
 export function addCard(input: { docId: string; docTitle: string; question: string; answer: string; source: string }) {
@@ -79,7 +85,7 @@ export function addCard(input: { docId: string; docTitle: string; question: stri
     remembered: 0,
   }
   if (!card.answer) return null
-  write(touchStudy({ ...state, cards: [card, ...state.cards] }))
+  if (!write(touchStudy({ ...state, cards: [card, ...state.cards] }))) return null
   return card
 }
 
@@ -97,7 +103,7 @@ export function reviewCard(id: string, remembered: boolean) {
       due: Date.now() + (remembered ? days * 86_400_000 : 10 * 60_000),
     }
   })
-  write(touchStudy({ ...state, cards, reviews: state.reviews + 1 }))
+  return write(touchStudy({ ...state, cards, reviews: state.reviews + 1 }))
 }
 
 export function removeCard(id: string) {

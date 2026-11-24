@@ -61,6 +61,15 @@ fn heading_level(level: HeadingLevel) -> u8 {
 
 /// 用 pulldown-cmark 建立块索引（当前覆盖标题/代码块/表格/引用）
 fn parse_blocks(text: &str) -> Vec<BlockView> {
+    // Front Matter 是元数据，不应进入大纲/块索引。
+    let fm_end = if text.starts_with("---\n") {
+        text[4..]
+            .find("\n---")
+            .map(|end| 4 + end + 4)
+            .unwrap_or(0)
+    } else {
+        0
+    };
     let mut out = Vec::new();
     let mut heading: Option<(u8, usize, usize)> = None;
     let mut heading_text = String::new();
@@ -87,14 +96,16 @@ fn parse_blocks(text: &str) -> Vec<BlockView> {
             }
             Event::End(TagEnd::Heading(_)) => {
                 if let Some((level, start, end)) = heading.take() {
-                    out.push(BlockView {
-                        kind: "heading".into(),
-                        level,
-                        line: line_of(start),
-                        start,
-                        end,
-                        text: heading_text.trim().to_string(),
-                    });
+                    if start >= fm_end {
+                        out.push(BlockView {
+                            kind: "heading".into(),
+                            level,
+                            line: line_of(start),
+                            start,
+                            end,
+                            text: heading_text.trim().to_string(),
+                        });
+                    }
                 }
             }
             Event::Start(Tag::CodeBlock(_)) => {
@@ -104,14 +115,16 @@ fn parse_blocks(text: &str) -> Vec<BlockView> {
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code = false;
-                out.push(BlockView {
-                    kind: "code".into(),
-                    level: 0,
-                    line: line_of(code_start),
-                    start: code_start,
-                    end: range.end,
-                    text: code_text.lines().next().unwrap_or("").chars().take(60).collect(),
-                });
+                if code_start >= fm_end {
+                    out.push(BlockView {
+                        kind: "code".into(),
+                        level: 0,
+                        line: line_of(code_start),
+                        start: code_start,
+                        end: range.end,
+                        text: code_text.lines().next().unwrap_or("").chars().take(60).collect(),
+                    });
+                }
             }
             Event::Start(Tag::Table(_)) => {
                 in_table = true;
@@ -119,24 +132,28 @@ fn parse_blocks(text: &str) -> Vec<BlockView> {
             }
             Event::End(TagEnd::Table) => {
                 in_table = false;
-                out.push(BlockView {
-                    kind: "table".into(),
-                    level: 0,
-                    line: line_of(table_start),
-                    start: table_start,
-                    end: range.end,
-                    text: "表格".into(),
-                });
+                if table_start >= fm_end {
+                    out.push(BlockView {
+                        kind: "table".into(),
+                        level: 0,
+                        line: line_of(table_start),
+                        start: table_start,
+                        end: range.end,
+                        text: "表格".into(),
+                    });
+                }
             }
             Event::Start(Tag::BlockQuote(_)) => {
-                out.push(BlockView {
-                    kind: "quote".into(),
-                    level: 0,
-                    line: line_of(range.start),
-                    start: range.start,
-                    end: range.end,
-                    text: String::new(),
-                });
+                if range.start >= fm_end {
+                    out.push(BlockView {
+                        kind: "quote".into(),
+                        level: 0,
+                        line: line_of(range.start),
+                        start: range.start,
+                        end: range.end,
+                        text: String::new(),
+                    });
+                }
             }
             _ => {}
         }
@@ -240,6 +257,12 @@ pub fn forget(path: &str) {
     }
 }
 
+pub fn forget_prefix(prefix: &str) {
+    if let Ok(mut map) = store().lock() {
+        map.retain(|path, _| path != prefix && !path.starts_with(&format!("{prefix}/")));
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -259,6 +282,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rope.to_string(), "你好，Inkspire");
+    }
+
+    #[test]
+    fn skips_front_matter_blocks() {
+        let blocks = parse_blocks("---\ntitle: 元数据\ntags: [x]\n---\n# 正文标题\n");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "正文标题");
+        assert_eq!(blocks[0].line, 5);
     }
 
     #[test]

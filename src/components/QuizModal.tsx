@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { reviewCard, type LearningCard } from '../lib/learning'
 import { Momo } from './Momo'
@@ -11,7 +11,8 @@ interface Props {
 }
 
 export function QuizModal({ cards, onClose }: Props) {
-  const picked = useMemo(() => [...cards].sort(() => Math.random() - 0.5).slice(0, Math.min(3, cards.length)), [cards])
+  // 打开小测时冻结题目；答一题会触发 learning 事件并刷新 cards，不能跟着重新抽题。
+  const [picked] = useState(() => [...cards].sort(() => Math.random() - 0.5).slice(0, Math.min(3, cards.length)))
   const [index, setIndex] = useState(0)
   const [revealed, setRevealed] = useState(false)
   const [correct, setCorrect] = useState(0)

@@ -142,7 +142,6 @@ export function ImportModal({ onClose, initialFiles }: { onClose: () => void; in
       if (!chapters.length && job.mode === 'split') continue
       const docs = toDocuments({ ...result, chapters }, job.mode, folder.trim() || '导入')
       for (const d of docs) pending.push({ doc: d, job })
-      update(job.id, { status: 'done' })
     }
 
     // 批量导入时把指向同批文件的链接改写成双链，Notion 的 UUID 文件名也能对上
@@ -180,15 +179,34 @@ export function ImportModal({ onClose, initialFiles }: { onClose: () => void; in
     // 每篇文档会插到列表最前；倒序写入，最终章节顺序才和书里一致。
     // 同时给同批章节分配递增顺序，之后编辑正文不会把文章顶到最上面。
     const baseOrder = vault.nextTreeOrder('bottom')
-    for (let i = pending.length - 1; i >= 0; i--) {
-      const { doc } = pending[i]
-      const created = await vault.importDoc({ ...doc, content: repairLinks(doc.content) } as any, baseOrder + i * 1000)
-      firstId = created.id
-      count++
+    const progress = new Map<string, { job: Job; total: number; done: number }>()
+    for (const { job } of pending) {
+      const row = progress.get(job.id) ?? { job, total: 0, done: 0 }
+      row.total += 1
+      progress.set(job.id, row)
     }
+    try {
+      for (let i = pending.length - 1; i >= 0; i--) {
+        const { doc, job } = pending[i]
+        const created = await vault.importDoc({ ...doc, content: repairLinks(doc.content) } as any, baseOrder + i * 1000)
+        firstId = created.id
+        count++
+        const row = progress.get(job.id)
+        if (row) row.done += 1
+      }
+    } catch (e: any) {
+      for (const row of progress.values()) {
+        if (row.done < row.total) update(row.job.id, { status: 'failed', error: `导入失败：${e?.message ?? e}` })
+        else update(row.job.id, { status: 'done' })
+      }
+      vault.flash(`导入失败：${e?.message ?? e}`, 'error')
+      return
+    }
+    for (const row of progress.values()) update(row.job.id, { status: 'done' })
     if (count) {
       vault.flash(`已导入 ${count} 篇文档`, 'success')
       vault.pet('happy', '都搬进来啦！', 2400)
+      if (vault.state.settings.qiniu.enabled) void vault.uploadAllImagesToQiniu()
       if (firstId) await vault.setActive(firstId)
       onClose()
     } else {

@@ -23,18 +23,23 @@ function read(): AiEdit[] {
   }
 }
 
-function write(rows: AiEdit[]): void {
+function write(rows: AiEdit[]): boolean {
   try {
     localStorage.setItem(KEY, JSON.stringify(rows))
+    return true
   } catch {
-    /* quota */
+    return false
   }
 }
 
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).length
+}
+
 /** 记录一次 AI 写入前后的完整文本，供一键撤销 */
-export function recordAiEdit(docId: string, label: string, before: string, after: string): void {
-  if (before === after) return
-  if (before.length > MAX_CHARS || after.length > MAX_CHARS) return
+export function recordAiEdit(docId: string, label: string, before: string, after: string): boolean {
+  if (before === after) return false
+  if (before.length > MAX_CHARS || after.length > MAX_CHARS) return false
   const entry: AiEdit = {
     id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     docId,
@@ -50,13 +55,15 @@ export function recordAiEdit(docId: string, label: string, before: string, after
     perDoc.set(row.docId, n)
     return n <= MAX_PER_DOC
   }).slice(0, MAX_TOTAL)
-  // 控制本机存储：从最旧的记录开始丢，保留最近的操作
-  let bytes = JSON.stringify(rows).length
+  // localStorage 配额按 UTF-16 字符计，但浏览器实际按 UTF-8 字节计；中文会差近 2 倍。
+  let bytes = utf8Bytes(JSON.stringify(rows))
   while (rows.length > 1 && bytes > MAX_BYTES) {
     rows.pop()
-    bytes = JSON.stringify(rows).length
+    bytes = utf8Bytes(JSON.stringify(rows))
   }
-  write(rows)
+  const ok = write(rows)
+  if (!ok) console.warn('[aiEdits] 撤销记录写入失败，可能是 localStorage 配额不足')
+  return ok
 }
 
 export function latestAiEdit(docId: string): AiEdit | null {

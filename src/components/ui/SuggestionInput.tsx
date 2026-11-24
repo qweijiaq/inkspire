@@ -67,6 +67,7 @@ export function SuggestionInput({ value, onChange, options, placeholder, ariaLab
             commit(active)
           }
           if (e.key === 'Escape') {
+            e.stopPropagation()
             setFilter('')
             setOpen(false)
           }

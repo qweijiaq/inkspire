@@ -46,12 +46,18 @@ export function Outline({ onJump, onOpenDoc }: Props) {
   }, [activeLine])
 
   useEffect(() => {
+    relatedRequest.current += 1
     setRelated(null)
     setRelatedNote('')
+    setRelatedBusy(false)
   }, [doc?.id])
+
+  const relatedRequest = useRef(0)
 
   const findRelated = async () => {
     if (!doc || relatedBusy) return
+    const requestId = ++relatedRequest.current
+    const docId = doc.id
     if (!state.settings.ai.enabled) {
       setRelatedNote('先在设置里启用 AI，才能按语义找相关笔记')
       return
@@ -59,7 +65,8 @@ export function Outline({ onJump, onOpenDoc }: Props) {
     setRelatedBusy(true)
     setRelatedNote('')
     const body = parseFrontMatter(doc.content).body
-    const result = await vault.findContextSmart(`${doc.title}\n${body.slice(0, 700)}`, doc.id, 4)
+    const result = await vault.findContextSmart(`${doc.title}\n${body.slice(0, 700)}`, docId, 4)
+    if (requestId !== relatedRequest.current) return
     setRelated(result.sources)
     setRelatedNote(result.note ?? (result.mode === 'semantic' ? '按语义相似度召回' : '按关键词召回'))
     setRelatedBusy(false)

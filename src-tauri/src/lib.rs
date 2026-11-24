@@ -6,7 +6,7 @@ mod settings;
 mod vault;
 
 use serde_json::json;
-use tauri::{Emitter, LogicalPosition, Manager};
+use tauri::{Emitter, LogicalPosition, Manager, WebviewWindow};
 
 #[tauri::command]
 fn pet_open(app: tauri::AppHandle) -> Result<(), String> {
@@ -46,7 +46,10 @@ fn pet_mood(app: tauri::AppHandle, mood: String, line: Option<String>) -> Result
 }
 
 #[tauri::command]
-async fn save_export(name: String, data: Vec<u8>) -> Result<String, String> {
+async fn save_export(window: WebviewWindow, name: String, data: Vec<u8>) -> Result<String, String> {
+    if window.label() != "main" {
+        return Err("导出只允许主窗口调用".into());
+    }
     let dir = dirs::download_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
         .ok_or("找不到下载目录")?
@@ -55,22 +58,44 @@ async fn save_export(name: String, data: Vec<u8>) -> Result<String, String> {
     let safe: String = name
         .chars()
         .map(|c| if c == '/' || c == '\\' || c == ':' { '_' } else { c })
-        .collect();
+        .collect::<String>()
+        .replace("..", "__");
     let path = dir.join(if safe.trim().is_empty() { "export".into() } else { safe });
     std::fs::write(&path, data).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-fn open_path(path: String) -> Result<(), String> {
+fn open_path(window: WebviewWindow, path: String) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("打开文件只允许主窗口调用".into());
+    }
     let p = std::path::Path::new(&path);
     if !p.exists() {
         return Err("文件不存在".into());
     }
+    // 只允许打开 Inkspire 导出目录里的非可执行文件，避免把导出的 .command/.app 当程序执行。
+    let dir = dirs::download_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+        .ok_or("找不到下载目录")?
+        .join("Inkspire");
+    let canonical_dir = std::fs::canonicalize(&dir).map_err(|e| format!("导出目录不可用: {e}"))?;
+    let canonical_path = std::fs::canonicalize(p).map_err(|e| format!("文件不可读: {e}"))?;
+    if !canonical_path.starts_with(&canonical_dir) {
+        return Err("只能打开 Inkspire 导出目录中的文件".into());
+    }
+    let ext = canonical_path
+        .extension()
+        .and_then(|x| x.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if !["md", "html", "htm", "docx", "epub", "pdf", "txt", "png", "jpg", "jpeg", "webp", "svg"].contains(&ext.as_str()) {
+        return Err("不允许打开这个文件类型".into());
+    }
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(&path)
+            .arg(&canonical_path)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -158,6 +183,7 @@ pub fn run() {
             vault::vault_delete,
             vault::vault_rename,
             vault::vault_rename_dir,
+            vault::vault_delete_dir,
             vault::vault_signature,
             vault::vault_asset_write,
             vault::vault_asset_read,

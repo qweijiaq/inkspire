@@ -72,7 +72,9 @@ function serializeNode(node: Node, ctx: Ctx): string {
     case 'h5':
     case 'h6': {
       const level = Number(tag.slice(1))
-      return `\n\n${'#'.repeat(level)} ${inline(el, ctx).trim()}\n\n`
+      // 标题里的 EPUB 内部锚点/跳转链接在正文里没有意义，只保留纯文字。
+      const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim() || inline(el, ctx).trim()
+      return `\n\n${'#'.repeat(level)} ${text}\n\n`
     }
     case 'p':
       return `\n\n${inline(el, ctx).trim()}\n\n`

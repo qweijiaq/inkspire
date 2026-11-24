@@ -157,9 +157,9 @@ export async function parsePdf(buf: ArrayBuffer, fileName: string): Promise<Pars
     diagnostics.push({ code: 'MANY_HEADINGS', severity: 'low', message: `检出 ${headingLines.length} 个候选标题，已按字号聚类收敛` })
   }
 
-  return {
-    importer: 'pdf',
-    tier: 'C',
+  const result = {
+    importer: 'pdf' as const,
+    tier: 'C' as const,
     title: bookTitle,
     markdown: md,
     chapters,
@@ -168,6 +168,9 @@ export async function parsePdf(buf: ArrayBuffer, fileName: string): Promise<Pars
     originalText: pages.flat().map((l) => l.text).join('\n'),
     pageCount: doc.numPages,
   }
+  // pdfjs 的 worker/字体缓存不会自动释放；导入完成后显式销毁，避免连续导入大 PDF 内存只增不减。
+  await task.destroy().catch(() => undefined)
+  return result
 }
 
 function isHeading(line: Line, bodySize: number): boolean {

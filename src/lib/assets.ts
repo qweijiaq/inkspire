@@ -2,9 +2,32 @@ import { idb } from './db'
 import { isTauri, platform } from './platform'
 
 const urlCache = new Map<string, string>()
+const MAX_CACHED_URLS = 160
+
+function rememberUrl(path: string, url: string) {
+  const old = urlCache.get(path)
+  if (old) URL.revokeObjectURL(old)
+  urlCache.set(path, url)
+  // 长会话打开大量图片时，淘汰最旧的 blob URL，避免内存只增不减。
+  while (urlCache.size > MAX_CACHED_URLS) {
+    const first = urlCache.keys().next().value as string | undefined
+    if (!first) break
+    const stale = urlCache.get(first)
+    if (stale) URL.revokeObjectURL(stale)
+    urlCache.delete(first)
+  }
+}
+
+/** 资源被同名覆盖或删除后，让下一次读取重新取 Blob。 */
+export function forgetAssetUrl(path: string) {
+  const old = urlCache.get(path)
+  if (old) URL.revokeObjectURL(old)
+  urlCache.delete(path)
+}
 
 /** 保存二进制资源：桌面写 vault/assets，浏览器预览写 IndexedDB assets store */
 export async function saveAsset(path: string, blob: Blob): Promise<string> {
+  forgetAssetUrl(path)
   if (isTauri) {
     const bytes = new Uint8Array(await blob.arrayBuffer())
     return platform.vaultAssetWrite(path, bytes)
@@ -31,7 +54,7 @@ export async function assetUrl(path: string): Promise<string | null> {
     }
     if (!blob) return null
     const url = URL.createObjectURL(blob)
-    urlCache.set(path, url)
+    rememberUrl(path, url)
     return url
   } catch {
     return null
@@ -41,7 +64,7 @@ export async function assetUrl(path: string): Promise<string | null> {
 export function dataUrlToBlob(dataUrl: string): Blob {
   const [head, body] = dataUrl.split(',')
   const mime = head.match(/data:([^;]+)/)?.[1] ?? 'image/png'
-  const binary = atob(body ?? '')
+  const binary = /;base64/i.test(head) ? atob(body ?? '') : decodeURIComponent(body ?? '')
   const bytes = new Uint8Array(binary.length)
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
   return new Blob([bytes], { type: mime })

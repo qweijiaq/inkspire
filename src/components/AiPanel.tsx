@@ -57,6 +57,7 @@ export function AiPanel({ onInsert, onOpenDoc, getSelection, onClose }: {
   const listRef = useRef<HTMLDivElement | null>(null)
   const deltaBuf = useRef('')
   const deltaRaf = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
 
   const headings = useMemo(() => (doc ? extractHeadings(doc.content).map((h) => h.text) : []), [doc?.content])
 
@@ -80,18 +81,24 @@ export function AiPanel({ onInsert, onOpenDoc, getSelection, onClose }: {
 
   // E19：对话留在本机，重开应用还能接着上次聊
   useEffect(() => {
-    try {
-      const saved = messages
-        .filter((m) => !m.streaming && m.content.trim())
-        .slice(-20)
-        .map((m) => ({ role: m.role, content: m.content, sources: m.sources }))
-      localStorage.setItem(CHAT_KEY, JSON.stringify(saved))
-    } catch {
-      /* ignore quota */
-    }
+    // 流式回答每帧都会更新 messages；等流结束/停顿后再落盘，避免 60 次/秒 JSON.stringify。
+    if (messages.some((m) => m.streaming)) return
+    const timer = window.setTimeout(() => {
+      try {
+        const saved = messages
+          .filter((m) => !m.streaming && m.content.trim())
+          .slice(-20)
+          .map((m) => ({ role: m.role, content: m.content, sources: m.sources }))
+        localStorage.setItem(CHAT_KEY, JSON.stringify(saved))
+      } catch {
+        /* ignore quota */
+      }
+    }, 250)
+    return () => window.clearTimeout(timer)
   }, [messages])
 
   useEffect(() => () => {
+    abortRef.current?.abort()
     if (deltaRaf.current) cancelAnimationFrame(deltaRaf.current)
   }, [])
 
@@ -148,6 +155,12 @@ export function AiPanel({ onInsert, onOpenDoc, getSelection, onClose }: {
     }
     const budget = ai.contextChars || 6000
     if (!vault.checkAiBudget(budget + 400)) return
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    if (deltaRaf.current) cancelAnimationFrame(deltaRaf.current)
+    deltaRaf.current = 0
+    deltaBuf.current = ''
     setBusy(true)
     const body = parseFrontMatter(doc.content).body
     const history = messages.slice(-4).map((m) => `${m.role === 'user' ? '问' : '答'}：${m.content.slice(0, 600)}`).join('\n')
@@ -181,6 +194,7 @@ export function AiPanel({ onInsert, onOpenDoc, getSelection, onClose }: {
     let full = ''
     try {
       const text = await streamChat(vault.state.settings.ai, msgList, (delta) => {
+        if (controller.signal.aborted) return
         full += delta
         deltaBuf.current += delta
         if (!deltaRaf.current) {
@@ -188,20 +202,28 @@ export function AiPanel({ onInsert, onOpenDoc, getSelection, onClose }: {
             deltaRaf.current = 0
             const chunk = deltaBuf.current
             deltaBuf.current = ''
-            if (!chunk) return
+            if (!chunk || controller.signal.aborted) return
             setMessages((prev) => prev.map((m) => (m.id === answerId ? { ...m, content: m.content + chunk } : m)))
           })
         }
-      })
+      }, controller.signal)
       vault.recordUsage(JSON.stringify(msgList).length, text.length)
       setMessages((prev) => prev.map((m) => (m.id === answerId ? { ...m, streaming: false } : m)))
     } catch (e: any) {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === answerId ? { ...m, streaming: false, error: e?.message ?? String(e) } : m)),
-      )
+      if (e?.name !== 'AbortError') {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === answerId ? { ...m, streaming: false, error: e?.message ?? String(e) } : m)),
+        )
+      } else {
+        setMessages((prev) => prev.map((m) => (m.id === answerId ? { ...m, streaming: false } : m)))
+      }
     } finally {
-      setBusy(false)
-      requestAnimationFrame(() => listRef.current?.scrollTo({ top: 999999 }))
+      // 旧请求被新请求 abort 时，不要把新请求的 busy 状态关掉。
+      if (abortRef.current === controller) {
+        abortRef.current = null
+        setBusy(false)
+        requestAnimationFrame(() => listRef.current?.scrollTo({ top: 999999 }))
+      }
     }
   }
 

@@ -48,11 +48,7 @@ export function livePreview(opts: Options = {}) {
     },
   )
   // 隐藏的语法标记作为原子区间：光标不会掉进 # / ** 里面，编辑不会破坏结构
-  return [
-    plugin,
-    EditorView.atomicRanges.of((view) => view.plugin(plugin)?.decorations ?? Decoration.none),
-    tableField(opts.onEditTable, opts.onEditMermaid, opts.onTocJump),
-  ]
+  return [plugin, tableField(opts.onEditTable, opts.onEditMermaid, opts.onTocJump)]
 }
 
 /** H2 编号只随文档内容变化重算；仅移动光标时复用上一次的扫描结果 */
@@ -116,6 +112,10 @@ function build(view: EditorView, opts: Options): DecorationSet {
   }
 
   const handled = new Set<number>()
+  if (fmEnd > 0) {
+    // 块级装饰必须由 StateField 提供；这里只负责跳过这些行的行内装饰。
+    for (let n = 1; n <= fmEnd; n++) handled.add(n)
+  }
   for (const range of view.visibleRanges) {
     let pos = range.from
     while (pos <= range.to) {
@@ -517,6 +517,26 @@ function tableField(onEditTable?: (payload: TableEditPayload) => void, onEditMer
   const build = (state: EditorState): DecorationSet => {
     const decos: Range<Decoration>[] = []
     let n = 1
+    // Front Matter 的块级收起必须放在 StateField（ViewPlugin 不允许 block decoration）。
+    let fmEnd = 0
+    if (state.doc.line(1).text.trim() === '---') {
+      const limit = Math.min(state.doc.lines, 80)
+      for (let i = 2; i <= limit; i++) {
+        if (state.doc.line(i).text.trim() === '---') {
+          fmEnd = i
+          break
+        }
+      }
+    }
+    if (fmEnd > 0) {
+      decos.push(
+        Decoration.replace({
+          block: true,
+          widget: new FrontMatterWidget(),
+        }).range(state.doc.line(1).from, state.doc.line(fmEnd).to),
+      )
+      n = fmEnd + 1
+    }
     let mermaidSeq = 0
     let plainFence: string | null = null
     while (n <= state.doc.lines) {
@@ -538,17 +558,19 @@ function tableField(onEditTable?: (payload: TableEditPayload) => void, onEditMer
         const code: string[] = []
         let last = line
         let k = n + 1
+        let found = false
         while (k <= state.doc.lines) {
           const cur = state.doc.line(k)
           if (new RegExp(`^\\s*${mark}`).test(cur.text)) {
             last = cur
+            found = true
             break
           }
           code.push(cur.text)
           last = cur
           k++
         }
-        if (last.number > n) {
+        if (found && last.number > n) {
           decos.push(
             Decoration.replace({
               block: true,
@@ -565,17 +587,19 @@ function tableField(onEditTable?: (payload: TableEditPayload) => void, onEditMer
         const code: string[] = []
         let last = line
         let k = n + 1
+        let found = false
         while (k <= state.doc.lines) {
           const cur = state.doc.line(k)
           if (new RegExp(`^\\s*${mark}`).test(cur.text)) {
             last = cur
+            found = true
             break
           }
           code.push(cur.text)
           last = cur
           k++
         }
-        if (last.number > n) {
+        if (found && last.number > n) {
           decos.push(
             Decoration.replace({
               block: true,
@@ -784,6 +808,8 @@ class FigureWidget extends WidgetType {
   }
 }
 
+const mermaidCache = new Map<string, string>()
+
 class MermaidWidget extends WidgetType {
   constructor(
     private code: string,
@@ -812,16 +838,25 @@ class MermaidWidget extends WidgetType {
     body.textContent = '正在绘制…'
     wrap.appendChild(body)
     const dark = document.documentElement.dataset.theme === 'night'
-    void import('mermaid')
-      .then(async (mod) => {
-        const mermaid = mod.default
-        mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'base', securityLevel: 'strict', fontFamily: 'inherit' })
-        const { svg } = await mermaid.render(`ink-mermaid-${Date.now()}-${this.id}`, this.code)
-        body.innerHTML = svg
-      })
-      .catch(() => {
-        body.textContent = 'Mermaid 语法有误，切到源码模式检查一下。'
-      })
+    const cacheKey = `${dark ? 'dark' : 'light'}:${this.code}`
+    const cached = mermaidCache.get(cacheKey)
+    if (cached) {
+      body.innerHTML = cached
+    } else {
+      void import('mermaid')
+        .then(async (mod) => {
+          const mermaid = mod.default
+          mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'base', securityLevel: 'strict', fontFamily: 'inherit' })
+          const { svg } = await mermaid.render(`ink-mermaid-${Date.now()}-${this.id}`, this.code)
+          if (!body.isConnected) return
+          body.innerHTML = svg
+          mermaidCache.set(cacheKey, svg)
+          while (mermaidCache.size > 30) mermaidCache.delete(mermaidCache.keys().next().value as string)
+        })
+        .catch(() => {
+          if (body.isConnected) body.textContent = 'Mermaid 语法有误，切到源码模式检查一下。'
+        })
+    }
     const edit = (e: Event) => {
       e.preventDefault()
       e.stopPropagation()
@@ -885,7 +920,22 @@ class TableWidget extends WidgetType {
     hint.className = 'cm-md-table-hint'
     hint.textContent = `${this.rows.length - 1} 行 × ${header.length} 列 · 点击直接编辑`
     wrap.appendChild(hint)
+    let lastContext = 0
+    let rightPressed = false
+    wrap.addEventListener('pointerdown', (e) => {
+      rightPressed = e.button !== 0 || e.buttons === 2 || e.ctrlKey
+    })
+    wrap.addEventListener('contextmenu', (e) => {
+      lastContext = Date.now()
+      rightPressed = true
+      e.preventDefault()
+      e.stopPropagation()
+    })
     const edit = (e: Event) => {
+      if (rightPressed) return
+      if (e instanceof MouseEvent && (e.button !== 0 || e.ctrlKey)) return
+      if (e instanceof MouseEvent && e.type === 'mousedown' && e.buttons !== 1) return
+      if (Date.now() - lastContext < 450) return
       e.preventDefault()
       e.stopPropagation()
       this.onEdit?.({ from: this.from, to: this.to, rows: this.rows, aligns: this.aligns })
@@ -989,6 +1039,18 @@ class ImageWidget extends WidgetType {
   }
   ignoreEvent() {
     return false
+  }
+}
+
+class FrontMatterWidget extends WidgetType {
+  toDOM() {
+    const el = document.createElement('div')
+    el.className = 'cm-md-frontmatter-hidden'
+    el.setAttribute('aria-hidden', 'true')
+    return el
+  }
+  ignoreEvent() {
+    return true
   }
 }
 

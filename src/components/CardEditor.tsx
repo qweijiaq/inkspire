@@ -46,7 +46,7 @@ export function CardEditor({ draft, onClose, onSave }: Props) {
           if (e.key === 'Escape') onClose()
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
             e.preventDefault()
-            onSave(question, answer)
+            if (question.trim() && answer.trim()) onSave(question, answer)
           }
         }}
       >

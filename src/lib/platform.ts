@@ -139,6 +139,11 @@ export const platform = {
     await invoke('vault_rename_dir', { from, to })
   },
 
+  async vaultDeleteDir(path: string): Promise<void> {
+    if (!isTauri) return
+    await invoke('vault_delete_dir', { path })
+  },
+
   async revealVault(): Promise<void> {
     if (!isTauri) return
     await invoke('vault_reveal')

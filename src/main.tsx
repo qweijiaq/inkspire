@@ -2,11 +2,24 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import { PetWindow } from './components/PetWindow'
+import { isTauri } from './lib/platform'
 import 'katex/dist/katex.min.css'
 import './styles/tokens.css'
 import './styles/app.css'
 
 const isPetWindow = new URLSearchParams(window.location.search).get('pet') === '1'
+
+// 桌面端不暴露 WebView 的浏览器右键菜单；复制/粘贴仍可用系统快捷键
+if (isTauri) {
+  window.addEventListener(
+    'contextmenu',
+    (event) => {
+      event.preventDefault()
+    },
+    { capture: true },
+  )
+}
+
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }

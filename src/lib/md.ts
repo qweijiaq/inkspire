@@ -131,6 +131,11 @@ export function composeDocument(fm: FrontMatter, body: string): string {
   return `${serializeFrontMatter(fm)}\n${body.replace(/^\n+/, '')}`
 }
 
+/** 导入的 EPUB/HTML 常把章节链接塞进标题；标题只保留可读文字。 */
+export function cleanHeadingLinks(text: string): string {
+  return text.replace(/^(#{1,6})\s+\[([^\]]+)\]\([^)\s]+\)\s*$/gm, '$1 $2')
+}
+
 /* ------------------------------------------------------------------ *
  * 派生信息
  * ------------------------------------------------------------------ */

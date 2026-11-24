@@ -92,12 +92,82 @@ export function Sidebar({ onOpenDoc, onNewDoc, onOpenImport, onOpenGraph, onRena
   const [moveTarget, setMoveTarget] = useState('')
   const [dragging, setDragging] = useState<string | null>(null)
   const [dropHint, setDropHint] = useState<DropHint>(null)
+  const pointerDrag = useRef<{ id: string; startX: number; startY: number; moved: boolean } | null>(null)
+  const suppressClick = useRef(0)
   const folderRef = useRef<HTMLDivElement | null>(null)
   const moveRef = useRef<HTMLDivElement | null>(null)
   const folderRenameRef = useRef<HTMLDivElement | null>(null)
   useDialogA11y(folderRef, () => setFolderPrompt(null), !!folderPrompt)
   useDialogA11y(moveRef, () => setMoving(null), !!moving)
   useDialogA11y(folderRenameRef, () => setFolderRename(null), !!folderRename)
+
+  // 桌面 WebView 对 HTML5 drag 支持不稳定，改用 Pointer Events，浏览器与桌面表现一致
+  useEffect(() => {
+    const under = (x: number, y: number) => document.elementFromPoint(x, y) as HTMLElement | null
+    const targetAt = (x: number, y: number) => {
+      const hit = under(x, y)
+      const row = hit?.closest('.tree-row') as HTMLElement | null
+      if (row?.dataset.folder !== undefined) return { kind: 'folder' as const, path: row.dataset.folder }
+      if (row?.dataset.docId && row.dataset.docPath) {
+        const rect = row.getBoundingClientRect()
+        return {
+          kind: 'doc' as const,
+          id: row.dataset.docId,
+          path: row.dataset.docPath,
+          after: y > rect.top + rect.height / 2,
+        }
+      }
+      if (hit?.closest('[data-drop-root]')) return { kind: 'folder' as const, path: '' }
+      return null
+    }
+    const move = (e: PointerEvent) => {
+      const d = pointerDrag.current
+      if (!d) return
+      if (!d.moved && Math.hypot(e.clientX - d.startX, e.clientY - d.startY) > 6) {
+        d.moved = true
+        setDragging(d.id)
+        document.body.classList.add('tree-dragging')
+      }
+      if (!d.moved) return
+      e.preventDefault()
+      const target = targetAt(e.clientX, e.clientY)
+      if (!target) setDropHint(null)
+      else if (target.kind === 'folder') setDropHint({ kind: 'folder', path: target.path })
+      else setDropHint({ kind: 'doc', path: target.path, pos: target.after ? 'after' : 'before' })
+    }
+    const finish = (e: PointerEvent) => {
+      const d = pointerDrag.current
+      pointerDrag.current = null
+      document.body.classList.remove('tree-dragging')
+      if (!d) return
+      setDragging(null)
+      setDropHint(null)
+      if (!d.moved) return
+      e.preventDefault()
+      suppressClick.current = Date.now() + 350
+      const target = targetAt(e.clientX, e.clientY)
+      if (!target) return
+      void (async () => {
+        await onFlush?.()
+        if (target.kind === 'doc') await vault.reorderDoc(d.id, target.id, target.after)
+        else await vault.moveDocToFolder(d.id, target.path)
+      })()
+    }
+    const cancel = () => {
+      pointerDrag.current = null
+      document.body.classList.remove('tree-dragging')
+      setDragging(null)
+      setDropHint(null)
+    }
+    window.addEventListener('pointermove', move, { passive: false })
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', cancel)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', cancel)
+    }
+  }, [onFlush])
 
   const tabs: { id: SidebarTab; label: string; icon: IconName }[] = [
     { id: 'files', label: '文件', icon: 'file' },
@@ -207,13 +277,15 @@ const moveFolderOptions = [
 
   const startRename = (doc: Document) => {
     setRenaming(doc.id)
-    setRenameValue(doc.path)
+    setRenameValue(doc.path.split('/').pop() ?? doc.path)
   }
 
   const commitRename = async (doc: Document) => {
-    if (renameValue.trim() && renameValue.trim() !== doc.path) {
+    const next = renameValue.trim()
+    const currentName = doc.path.split('/').pop() ?? doc.path
+    if (next && next !== currentName && next !== doc.path) {
       await onFlush?.()
-      await vault.rename(doc.id, renameValue.trim())
+      await vault.rename(doc.id, next)
     }
     setRenaming(null)
   }
@@ -290,50 +362,26 @@ const moveFolderOptions = [
         role="treeitem"
         aria-selected={isActive}
         tabIndex={0}
-        draggable={sortable}
-        onClick={() => onOpenDoc(doc.id)}
-        onDoubleClick={() => startRename(doc)}
+        data-doc-id={doc.id}
+        data-doc-path={doc.path}
+        onPointerDown={(e) => {
+          if (!sortable || e.button !== 0) return
+          if ((e.target as HTMLElement).closest('button, input')) return
+          pointerDrag.current = { id: doc.id, startX: e.clientX, startY: e.clientY, moved: false }
+        }}
+        onClick={() => {
+          if (Date.now() < suppressClick.current) return
+          onOpenDoc(doc.id)
+        }}
+        onDoubleClick={() => {
+          if (Date.now() < suppressClick.current) return
+          startRename(doc)
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
             onOpenDoc(doc.id)
           }
-        }}
-        onDragStart={(e) => {
-          if (!sortable) return
-          e.stopPropagation()
-          setDragging(doc.id)
-          e.dataTransfer.effectAllowed = 'move'
-          e.dataTransfer.setData('text/plain', doc.id)
-        }}
-        onDragEnd={() => {
-          setDragging(null)
-          setDropHint(null)
-        }}
-        onDragOver={(e) => {
-          if (!dragging || dragging === doc.id) return
-          e.preventDefault()
-          e.stopPropagation()
-          e.dataTransfer.dropEffect = 'move'
-          const rect = e.currentTarget.getBoundingClientRect()
-          setDropHint({ kind: 'doc', path: doc.path, pos: e.clientY > rect.top + rect.height / 2 ? 'after' : 'before' })
-        }}
-        onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropHint(null)
-        }}
-        onDrop={(e) => {
-          if (!dragging) return
-          e.preventDefault()
-          e.stopPropagation()
-          const rect = e.currentTarget.getBoundingClientRect()
-          const after = e.clientY > rect.top + rect.height / 2
-          const id = dragging
-          setDragging(null)
-          setDropHint(null)
-          void (async () => {
-            await onFlush?.()
-            await vault.reorderDoc(id, doc.id, after)
-          })()
         }}
         data-tip={doc.path}
       >
@@ -400,34 +448,13 @@ const moveFolderOptions = [
                 role="treeitem"
                 aria-expanded={!isCollapsed}
                 tabIndex={0}
+                data-folder={f.path}
                 onClick={() => toggleFolder(f.path)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault()
                     toggleFolder(f.path)
                   }
-                }}
-                onDragOver={(e) => {
-                  if (!dragging) return
-                  e.preventDefault()
-                  e.stopPropagation()
-                  e.dataTransfer.dropEffect = 'move'
-                  setDropHint({ kind: 'folder', path: f.path })
-                }}
-                onDragLeave={(e) => {
-                  if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropHint(null)
-                }}
-                onDrop={(e) => {
-                  if (!dragging) return
-                  e.preventDefault()
-                  e.stopPropagation()
-                  const id = dragging
-                  setDragging(null)
-                  setDropHint(null)
-                  void (async () => {
-                    await onFlush?.()
-                    await vault.moveDocToFolder(id, f.path)
-                  })()
                 }}
               >
                 <span className="fic"><Icon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={14} /></span>
@@ -456,6 +483,27 @@ const moveFolderOptions = [
                     }}
                   >
                     <Icon name="edit" size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="删除文件夹"
+                    data-tip="删除文件夹"
+                    onClick={async () => {
+                      const count = state.docs.filter((d) => d.path === f.path || d.path.startsWith(`${f.path}/`)).length
+                      const ok = await confirmDialog({
+                        title: '删除文件夹',
+                        message: isTauri
+                          ? `《${f.name}》及其中 ${count} 篇文档会移到 vault 的 .trash，不会永久删除，可从磁盘找回。`
+                          : `删除《${f.name}》及其中 ${count} 篇文档？浏览器预览数据会被移除。`,
+                        confirmText: isTauri ? '归档文件夹' : '删除',
+                        danger: true,
+                      })
+                      if (!ok) return
+                      await onFlush?.()
+                      await vault.deleteFolder(f.path)
+                    }}
+                  >
+                    <Icon name="trash" size={14} />
                   </button>
                 </span>
               </div>
@@ -519,28 +567,7 @@ const moveFolderOptions = [
             <div
               className={`side-section-title${dropHint?.kind === 'folder' && dropHint.path === '' ? ' drop-root' : ''}`}
               style={{ paddingTop: 2 }}
-              onDragOver={(e) => {
-                if (!dragging) return
-                e.preventDefault()
-                e.stopPropagation()
-                e.dataTransfer.dropEffect = 'move'
-                setDropHint({ kind: 'folder', path: '' })
-              }}
-              onDragLeave={(e) => {
-                if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropHint(null)
-              }}
-              onDrop={(e) => {
-                if (!dragging) return
-                e.preventDefault()
-                e.stopPropagation()
-                const id = dragging
-                setDragging(null)
-                setDropHint(null)
-                void (async () => {
-                  await onFlush?.()
-                  await vault.moveDocToFolder(id, '')
-                })()
-              }}
+              data-drop-root
             >
               全部文档 <span style={{ fontWeight: 600 }}>{state.docs.length}</span>
             </div>

@@ -23,9 +23,14 @@ export function loadReading(): ReadingSpot[] {
   }
 }
 
-function save(next: ReadingSpot[]) {
-  localStorage.setItem(KEY, JSON.stringify(next.slice(0, 30)))
-  window.dispatchEvent(new CustomEvent('inkspire:reading'))
+function save(next: ReadingSpot[]): boolean {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(next.slice(0, 30)))
+    window.dispatchEvent(new CustomEvent('inkspire:reading'))
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function saveReading(
@@ -37,7 +42,7 @@ export function saveReading(
   const list = loadReading()
   const old = list.find((x) => x.docId === docId)
   const next = [{ docId, title, line, at: Date.now(), seconds: old?.seconds ?? 0, ...extra }, ...list.filter((x) => x.docId !== docId)]
-  save(next)
+  return save(next)
 }
 
 export function addReadingSeconds(docId: string, title: string, seconds: number) {
@@ -46,7 +51,7 @@ export function addReadingSeconds(docId: string, title: string, seconds: number)
   const next = old
     ? [{ ...old, title, seconds: (old.seconds ?? 0) + seconds }, ...list.filter((x) => x.docId !== docId)]
     : [{ docId, title, line: 1, at: Date.now(), seconds }, ...list]
-  save(next)
+  return save(next)
 }
 
 export function getReading(docId: string): ReadingSpot | null {

@@ -5,10 +5,13 @@ import { apiKeyFor, defaultEmbeddingModel, presetOf } from './providers'
 import introRaw from '../../docs/initial/项目介绍.md?raw'
 import usageRaw from '../../docs/initial/项目使用.md?raw'
 import markdownRaw from '../../docs/initial/Markdown 支持.md?raw'
-import { countWords, deriveTitle, makePreview, parseFrontMatter, serializeFrontMatter } from './md'
+import { cleanHeadingLinks, countWords, deriveTitle, makePreview, parseFrontMatter, serializeFrontMatter } from './md'
+import { assetUrl, dataUrlToBlob } from './assets'
+import { qiniuReady, uploadBlobToQiniu } from './qiniu'
 import type {
   AISettings,
   AppSettings,
+  QiniuSettings,
   Document,
   DocumentVersion,
   FrontMatter,
@@ -33,6 +36,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   privacyLocalOnly: false,
   sidebarTab: 'files',
   persona: 'gentle',
+  qiniu: {
+    enabled: false,
+    accessKey: '',
+    bucket: '',
+    domain: '',
+    prefix: '',
+    zone: 'z0',
+    secretSet: false,
+  },
   ai: {
     provider: 'demo',
     baseUrl: '',
@@ -49,7 +61,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
 }
 
-export type SettingsPatch = Partial<Omit<AppSettings, 'ai'>> & { ai?: Partial<AISettings> }
+export type SettingsPatch = Partial<Omit<AppSettings, 'ai' | 'qiniu'>> & { ai?: Partial<AISettings>; qiniu?: Partial<QiniuSettings> }
 
 export interface AiLedgerEntry {
   at: number
@@ -197,7 +209,8 @@ function normalizeSettings(settings: AppSettings): AppSettings {
     ai.baseUrl = ''
     ai.model = ai.model || 'demo'
   }
-  return { ...DEFAULT_SETTINGS, ...settings, ai }
+  const qiniu = { ...DEFAULT_SETTINGS.qiniu, ...(settings.qiniu ?? {}) }
+  return { ...DEFAULT_SETTINGS, ...settings, ai, qiniu }
 }
 
 function dayKey(ts = Date.now()): string {
@@ -484,12 +497,17 @@ export class Vault {
       const doc = next.find((d) => d.path === item.path)
       const body = doc ? parseFrontMatter(doc.content).body.trimStart() : ''
       if (!doc || !body.includes(item.prefix)) continue
-      next = next.filter((d) => d.id !== doc.id)
-      try {
-        if (isTauri) await platform.vaultDelete(item.path)
-        else await idb.del('docs', doc.id)
-      } catch {
-        /* 旧种子文件已不存在时忽略 */
+      // 不再直接删除旧种子文档：先归档到 .trash，归档失败就保留。
+      // 用户可能已经在旧种子上续写，误删是不可恢复的数据损失。
+      if (isTauri) {
+        const base = item.path.split('/').pop() || 'legacy.md'
+        const archive = `.trash/legacy-${Date.now()}-${base}`
+        try {
+          await platform.vaultRename(item.path, archive)
+          next = next.filter((d) => d.id !== doc.id)
+        } catch {
+          /* 归档失败：保留原文档，宁可多一篇也不丢内容 */
+        }
       }
     }
     return next
@@ -563,22 +581,25 @@ export class Vault {
     } as AppSettings)
 
     // 明文 Key 迁移到系统钥匙串，成功后再从设置文件里抹掉
-    let migrated = false
+    const migrated: string[] = []
     const legacyKeys: Record<string, string> = { ...(settings.ai.keys ?? {}) }
     if (settings.ai.apiKey) legacyKeys[settings.ai.provider] = settings.ai.apiKey
     for (const [provider, value] of Object.entries(legacyKeys)) {
       if (!value) continue
       try {
         await platform.secretSet(provider, value)
-        migrated = true
+        migrated.push(provider)
       } catch {
-        /* 钥匙串不可用时保留明文，避免丢 Key */
+        /* 钥匙串不可用时保留这个 provider 的明文，避免丢 Key */
       }
     }
-    if (migrated) {
-      settings.ai.keys = {}
-      settings.ai.apiKey = ''
-      await platform.saveSettings({ ...settings, ai: { ...settings.ai, keys: {}, apiKey: '' } })
+    if (migrated.length) {
+      const remainingKeys = { ...(settings.ai.keys ?? {}) }
+      for (const provider of migrated) delete remainingKeys[provider]
+      const remainingApiKey = migrated.includes(settings.ai.provider) ? '' : settings.ai.apiKey
+      settings.ai.keys = remainingKeys
+      settings.ai.apiKey = remainingApiKey
+      await platform.saveSettings({ ...settings, ai: { ...settings.ai, keys: remainingKeys, apiKey: remainingApiKey } })
     }
 
     const files = await platform.vaultList()
@@ -591,6 +612,20 @@ export class Vault {
     } else {
       list = files.map((f) => docFromFile(f, metaMap.get(f.path)))
       list = await this.migrateLegacyDocs(list)
+      // 旧版 EPUB/HTML 导入把内部锚点写进了标题；启动时只清理这一种明确的脏数据。
+      for (const d of list) {
+        if (!d.frontMatter.source) continue
+        const cleaned = cleanHeadingLinks(d.content)
+        if (cleaned === d.content) continue
+        d.content = cleaned
+        d.wordCount = countWords(cleaned)
+        d.preview = makePreview(cleaned)
+        try {
+          await platform.vaultWrite(d.path, cleaned)
+        } catch (e) {
+          console.warn('[init] clean imported headings failed', d.path, e)
+        }
+      }
     }
     if (list.length || !seeded) localStorage.setItem('inkspire:seeded', '1')
     list.sort((a, b) => b.updatedAt - a.updatedAt)
@@ -654,7 +689,12 @@ export class Vault {
 
   async updateSettings(patch: SettingsPatch) {
     const prevAi = this.state.settings.ai
-    const settings = { ...this.state.settings, ...patch, ai: { ...this.state.settings.ai, ...(patch.ai ?? {}) } }
+    const settings = {
+      ...this.state.settings,
+      ...patch,
+      ai: { ...this.state.settings.ai, ...(patch.ai ?? {}) },
+      qiniu: { ...this.state.settings.qiniu, ...(patch.qiniu ?? {}) },
+    }
     if (patch.theme) this.applyTheme(settings)
     this.set({ settings })
 
@@ -902,6 +942,117 @@ export class Vault {
     this.set({ folders: [...new Set([...this.state.folders, path])] })
     this.flash('文件夹已创建', 'success')
     return path
+  }
+
+  /** 删除文件夹：桌面端归档到 .trash，浏览器预览删除本地文档记录。 */
+  async deleteFolder(folderPath: string) {
+    const folder = folderPath.replace(/\/+$/, '')
+    if (!folder) return false
+    const affected = this.state.docs.filter((d) => d.path === folder || d.path.startsWith(`${folder}/`))
+    if (isTauri) {
+      try {
+        await platform.vaultDeleteDir(folder)
+      } catch (e: any) {
+        this.flash(`删除文件夹失败：${e?.message ?? e}`, 'error')
+        return false
+      }
+    } else {
+      for (const doc of affected) await idb.del('docs', doc.id)
+    }
+    for (const doc of affected) await idb.del('meta', doc.path)
+    const remaining = this.state.docs.filter((d) => !affected.some((x) => x.id === d.id))
+    const folders = this.state.folders.filter((f) => f !== folder && !f.startsWith(`${folder}/`))
+    const treeOrder = { ...this.state.treeOrder }
+    for (const key of Object.keys(treeOrder)) {
+      if (key === folder || key.startsWith(`${folder}/`)) delete treeOrder[key]
+    }
+    const activeRemoved = affected.some((d) => d.id === this.state.activeId)
+    this.set({
+      docs: remaining,
+      folders,
+      treeOrder,
+      activeId: activeRemoved ? remaining[0]?.id ?? null : this.state.activeId,
+      savedAt: Date.now(),
+    })
+    this.persistTreeOrder(treeOrder)
+    if (activeRemoved) localStorage.setItem('inkspire:lastDoc', remaining[0]?.id ?? '')
+    this.flash(isTauri ? '文件夹已归档到 .trash' : '文件夹已删除', 'success')
+    return true
+  }
+
+  /** 有七牛配置时把新图片发布到云端；失败回退本地路径，不阻断写作。 */
+  async publishImage(localPath: string, blob: Blob): Promise<string> {
+    const config = this.state.settings.qiniu
+    if (!config?.enabled) return localPath
+    try {
+      const secret = await platform.secretGet('qiniu-sk')
+      if (!qiniuReady(config, secret)) return localPath
+      return await uploadBlobToQiniu(blob, localPath.split('/').pop() ?? 'image.png', config, secret)
+    } catch (e: any) {
+      this.flash(`七牛上传失败，已保留本地图片：${e?.message ?? e}`, 'error')
+      return localPath
+    }
+  }
+
+  /** 把当前库里的 data URL / assets 图片批量上传到七牛，并回写 Markdown。 */
+  async uploadAllImagesToQiniu(onProgress?: (done: number, total: number) => void) {
+    const config = this.state.settings.qiniu
+    const secret = await platform.secretGet('qiniu-sk')
+    if (!qiniuReady(config, secret)) {
+      this.flash('七牛云未配置完整（AccessKey / SecretKey / Bucket / Domain）', 'error')
+      return { uploaded: 0, failed: 0 }
+    }
+    const imageRe = /!\[[^\]]*\]\(([^)\n]+)\)/g
+    const jobs: { docId: string; from: string; blob: Blob; name: string }[] = []
+    for (const doc of this.state.docs) {
+      const seen = new Set<string>()
+      for (const match of doc.content.matchAll(imageRe)) {
+        const src = match[1]
+        if (seen.has(src) || /^https?:/i.test(src)) continue
+        seen.add(src)
+        try {
+          if (src.startsWith('data:image/')) {
+            const ext = src.match(/^data:image\/([a-z0-9.+-]+)/i)?.[1]?.replace('jpeg', 'jpg') ?? 'png'
+            jobs.push({ docId: doc.id, from: src, blob: dataUrlToBlob(src), name: `image-${jobs.length + 1}.${ext}` })
+          } else if (src.startsWith('assets/')) {
+            const url = await assetUrl(src)
+            if (!url) continue
+            const blob = await fetch(url).then((r) => r.blob())
+            jobs.push({ docId: doc.id, from: src, blob, name: src.split('/').pop() ?? 'image.png' })
+          }
+        } catch {
+          /* 单张读不到就跳过 */
+        }
+      }
+    }
+    let uploaded = 0
+    let failed = 0
+    const replacements = new Map<string, string>()
+    for (let i = 0; i < jobs.length; i++) {
+      const job = jobs[i]
+      try {
+        const remote = await uploadBlobToQiniu(job.blob, job.name, config, secret)
+        replacements.set(job.from, remote)
+        uploaded++
+      } catch (e: any) {
+        failed++
+        console.warn('[qiniu] upload failed', job.name, e)
+      }
+      onProgress?.(i + 1, jobs.length)
+    }
+    if (replacements.size) {
+      for (const doc of [...this.state.docs]) {
+        let next = doc.content
+        for (const [from, to] of replacements) next = next.split(from).join(to)
+        if (next !== doc.content) await this.saveContent(doc.id, next, 'manual')
+      }
+      window.dispatchEvent(new Event('inkspire:vault-restored'))
+    }
+    this.flash(
+      failed ? `已上传 ${uploaded} 张，失败 ${failed} 张` : `已上传 ${uploaded} 张图片到七牛云`,
+      failed ? 'info' : 'success',
+    )
+    return { uploaded, failed }
   }
 
   async setVaultPath(path: string) {
@@ -1155,7 +1306,8 @@ export class Vault {
       while (versions.length > 40) versions.shift()
     }
     let updatedAt = now
-    this.set({ savingDocId: id, saveErrorDocId: null })
+    const previousError = this.state.saveErrorDocId && this.state.saveErrorDocId !== id ? this.state.saveErrorDocId : null
+    this.set({ savingDocId: id, saveErrorDocId: previousError })
     try {
       if (isTauri) {
         const res = await platform.vaultWrite(doc.path, content)
@@ -1166,22 +1318,34 @@ export class Vault {
       this.flash(`保存失败：${e?.message ?? e}`, 'error')
       return false
     }
+    // await 期间用户可能点了收藏/回滚；用最新内存文档合并元数据，避免旧快照覆盖。
+    const latest = this.getDoc(id) ?? doc
+    const latestVersions = [...latest.versions]
+    for (const version of versions) {
+      if (!latestVersions.some((x) => x.id === version.id)) latestVersions.push(version)
+    }
+    while (latestVersions.length > 40) latestVersions.shift()
+    const contentStillCurrent = latest.content === content
     const next: Document = {
-      ...doc,
-      content,
-      frontMatter: fm,
-      title: deriveTitle(content, doc.path),
+      ...latest,
+      ...(contentStillCurrent
+        ? {
+            content,
+            frontMatter: fm,
+            title: deriveTitle(content, doc.path),
+            wordCount: countWords(content),
+            preview: makePreview(content),
+          }
+        : {}),
       updatedAt,
-      wordCount: countWords(content),
-      preview: makePreview(content),
-      versions,
+      versions: latestVersions,
     }
     this.set({
       docs: this.state.docs.map((d) => (d.id === id ? next : d)),
       savedAt: updatedAt,
       savedAtByDoc: { ...this.state.savedAtByDoc, [id]: updatedAt },
       savingDocId: null,
-      saveErrorDocId: null,
+      saveErrorDocId: this.state.saveErrorDocId === id ? null : this.state.saveErrorDocId,
     })
     if (!isTauri) await idb.put('docs', next)
     this.persistMeta(next)
@@ -1321,7 +1485,12 @@ export class Vault {
 
   async rename(id: string, newPath: string) {    const doc = this.getDoc(id)
     if (!doc) return
-    let path = ensureMd(newPath)
+    const raw = ensureMd(newPath)
+    // 侧栏只显示文件名时，重命名必须留在原文件夹里；带 / 的输入才按完整路径处理。
+    let path = raw
+    const parent = parentDir(doc.path)
+    if (parent && !raw.includes('/')) path = ensureMd(`${parent}/${raw}`)
+    if (path === doc.path) return
     if (this.state.docs.some((d) => d.id !== id && d.path === path)) {
       this.flash('已存在同名文档', 'error')
       return
@@ -1362,6 +1531,7 @@ export class Vault {
       docs: this.state.docs.map((d) => (d.id === id ? next : d)),
       activeId: this.state.activeId === id ? nextId : this.state.activeId,
     })
+    window.dispatchEvent(new CustomEvent('inkspire:doc-renamed', { detail: { from: id, to: nextId } }))
     if (!isTauri) await idb.put('docs', next)
     this.persistMeta(next)
     localStorage.setItem('inkspire:lastDoc', nextId)

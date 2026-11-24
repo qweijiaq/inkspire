@@ -250,53 +250,96 @@ async fn stream_chat<F: FnMut(&str)>(req: &AiRequest, mut on_delta: F) -> Result
     }
 
     let mut stream = res.bytes_stream();
+    let mut pending = Vec::<u8>::new();
     let mut buf = String::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("读取流失败: {e}"))?;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(pos) = buf.find('\n') {
-            let line: String = buf.drain(..=pos).collect();
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let payload = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
-            if payload == "[DONE]" {
-                continue;
-            }
-            let Ok(value) = serde_json::from_str::<Value>(payload) else {
-                continue;
-            };
-            if let Some(message) = payload_error(&value) {
-                return Err(message);
-            }
-            let delta = if is_anthropic {
-                if value.get("type").and_then(|v| v.as_str()) == Some("content_block_delta") {
-                    value
-                        .get("delta")
-                        .and_then(|d| d.get("text"))
-                        .and_then(|t| t.as_str())
-                        .map(str::to_string)
-                } else {
-                    None
-                }
-            } else {
+    let mut handle_line = |line: &str| -> Result<(), String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(());
+        }
+        let payload = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
+        if payload == "[DONE]" {
+            return Ok(());
+        }
+        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+            return Ok(());
+        };
+        if let Some(message) = payload_error(&value) {
+            return Err(message);
+        }
+        let delta = if is_anthropic {
+            if value.get("type").and_then(|v| v.as_str()) == Some("content_block_delta") {
                 value
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
-                    .and_then(|d| d.get("content"))
+                    .get("delta")
+                    .and_then(|d| d.get("text"))
                     .and_then(|t| t.as_str())
                     .map(str::to_string)
-            };
-            if let Some(text) = delta {
-                if !text.is_empty() {
-                    on_delta(&text);
+            } else {
+                None
+            }
+        } else {
+            value
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("delta"))
+                .and_then(|d| d.get("content"))
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        };
+        if let Some(text) = delta {
+            if !text.is_empty() {
+                on_delta(&text);
+            }
+        }
+        Ok(())
+    };
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("读取流失败: {e}"))?;
+        pending.extend_from_slice(&chunk);
+        drain_utf8(&mut pending, &mut buf);
+        while let Some(pos) = buf.find('\n') {
+            let line: String = buf.drain(..=pos).collect();
+            handle_line(&line)?;
+        }
+    }
+    // 某些网关的最后一帧不带换行；收尾时不能丢。
+    if !pending.is_empty() {
+        buf.push_str(&String::from_utf8_lossy(&pending));
+    }
+    if !buf.trim().is_empty() {
+        handle_line(&buf)?;
+    }
+    Ok(())
+}
+
+
+/// 将字节流中完整的 UTF-8 前缀追加到 out，跨 chunk 的多字节字符留在 pending。
+fn drain_utf8(pending: &mut Vec<u8>, out: &mut String) {
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                out.push_str(text);
+                pending.clear();
+                break;
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                if valid > 0 {
+                    out.push_str(std::str::from_utf8(&pending[..valid]).expect("validated utf8 prefix"));
+                    pending.drain(..valid);
+                }
+                match err.error_len() {
+                    Some(len) => {
+                        out.push('\u{FFFD}');
+                        pending.drain(..len);
+                    }
+                    // 不完整的多字节字符：等下一个 chunk。
+                    None => break,
                 }
             }
         }
     }
-    Ok(())
 }
 
 fn payload_error(value: &Value) -> Option<String> {
@@ -606,6 +649,21 @@ pub async fn ai_models(req: ModelsRequest) -> Result<Vec<String>, String> {    l
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_multibyte_utf8_split_across_chunks() {
+        let source = "你好🙂世界";
+        let mut pending = Vec::new();
+        let mut out = String::new();
+        for byte in source.as_bytes() {
+            pending.push(*byte);
+            drain_utf8(&mut pending, &mut out);
+        }
+        if !pending.is_empty() {
+            out.push_str(&String::from_utf8_lossy(&pending));
+        }
+        assert_eq!(out, source);
+    }
 
     /// 真实接口冒烟测试：需要环境变量提供凭据，默认忽略
     /// INK_TEST_PROVIDER / INK_TEST_BASE / INK_TEST_MODEL / INK_TEST_KEY

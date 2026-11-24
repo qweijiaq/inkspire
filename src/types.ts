@@ -202,6 +202,17 @@ export interface SourceRef {
   excerpt: string
 }
 
+export interface QiniuSettings {
+  enabled: boolean
+  accessKey: string
+  bucket: string
+  domain: string
+  prefix: string
+  zone: string
+  /** SecretKey 存钥匙串；这里只标记是否已保存 */
+  secretSet?: boolean
+}
+
 export interface AppSettings {
   /** 桌面版 vault 根目录；空字符串表示默认 ~/Documents/Inkspire */
   vaultPath?: string
@@ -217,6 +228,7 @@ export interface AppSettings {
   focusMode: boolean
   autosaveMs: number
   ai: AISettings
+  qiniu: QiniuSettings
   /** 隐私模式：AI 只允许本地/离线服务商，请求不出机 */
   privacyLocalOnly?: boolean
   sidebarTab: SidebarTab
