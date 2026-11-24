@@ -58,6 +58,27 @@ ${ctx.headings.length ? `已有大纲：${ctx.headings.slice(0, 12).join(' / ')}
     .join('\n')
   const relatedBlock = related ? `\n可能相关的笔记（只作参考，不要编造内容）：\n${related}\n` : ''
 
+  if (mode === 'polish-doc') {
+    return [
+      { role: 'system', content: SYSTEM },
+      {
+        role: 'user',
+        content: `${head}${relatedBlock}
+
+请对下面整篇文章做一次「润色 + 排版」，直接输出处理后的完整 Markdown 正文：
+- 保留原文的事实、观点、数字、链接、图片、表格和代码块，不新增事实
+- 统一标题层级：只保留一个一级标题（正文已有则不要再加），二级/三级标题按内容归并
+- 段落拆短，列表统一用「- 」，删除重复和口水话
+- 保留 [[双链]]、#标签、图片语法和代码围栏
+- 不要输出解释、前言、结语，也不要用 \`\`\`markdown 包住全文
+
+正文：
+<<<
+${ctx.selection}
+>>>`,
+      },
+    ]
+  }
   if (mode === 'rewrite') {
     return [
       { role: 'system', content: SYSTEM },

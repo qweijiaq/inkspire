@@ -177,9 +177,10 @@ export function ImportModal({ onClose, initialFiles }: { onClose: () => void; in
         return `[[${target}${text && text !== target ? `|${text}` : ''}]]`
       })
 
-    for (const { doc } of pending) {
+    // 每篇文档会插到列表最前；倒序写入，最终章节顺序才和书里一致
+    for (const { doc } of [...pending].reverse()) {
       const created = await vault.importDoc({ ...doc, content: repairLinks(doc.content) } as any)
-      if (!firstId) firstId = created.id
+      firstId = created.id
       count++
     }
     if (count) {

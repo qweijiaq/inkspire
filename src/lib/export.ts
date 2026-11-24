@@ -60,7 +60,7 @@ pre code{border:none;background:transparent}
 table{border-collapse:collapse;width:100%;margin:1em 0}
 th{background:#5A52C9;color:#fff}
 th,td{border:1.5px solid #2E2A3E;padding:6px 10px;text-align:left}
-img{max-width:100%;border:2px solid #2E2A3E;border-radius:12px}
+img{max-width:100%;display:block;margin:1em auto;border:2px solid #2E2A3E;border-radius:12px}
 a{color:#5A52C9}
 hr{border:none;border-top:2px dashed #E7DFCE;margin:2em 0}
 .meta{color:#9A94AC;font-size:12px;margin-bottom:24px}
@@ -165,7 +165,7 @@ export async function epubBlob(doc: Document): Promise<{ blob: Blob; name: strin
     'OEBPS/nav.xhtml',
     `<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head><body><nav epub:type="toc"><h1>目录</h1><ol>${nav}</ol></nav></body></html>`,
   )
-  zip.file('OEBPS/style.css', `body{font-family:"PingFang SC",serif;line-height:1.9;margin:5%}h1{font-size:1.6em}h2{font-size:1.3em;border-bottom:1px solid #ddd}blockquote{border-left:3px solid #2FB79A;padding-left:1em;color:#555}code{background:#f4f1e8;padding:.1em .3em;border-radius:4px}${FIGURE_EXPORT_CSS}`)
+  zip.file('OEBPS/style.css', `body{font-family:"PingFang SC",serif;line-height:1.9;margin:5%}h1{font-size:1.6em}h2{font-size:1.3em;border-bottom:1px solid #ddd}blockquote{border-left:3px solid #2FB79A;padding-left:1em;color:#555}code{background:#f4f1e8;padding:.1em .3em;border-radius:4px}img{display:block;margin:1em auto;max-width:100%}${FIGURE_EXPORT_CSS}`)
   for (let i = 0; i < chapters.length; i++) {
     const c = chapters[i]
     const chapterBody = await inlineAssets(md.render(c.text))

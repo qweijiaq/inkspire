@@ -153,6 +153,7 @@ const MODE_LABEL: Record<string, string> = {
   rewrite: '润色',
   summarize: '总结',
   translate: '翻译',
+  'polish-doc': '全文润色排版',
   custom: '自定义',
   'polish-headings': '小标题',
 }
@@ -160,6 +161,7 @@ const MODE_LABEL: Record<string, string> = {
 const AI_MENU: { icon: IconName; label: string; mode: string; instruction?: string }[] = [
   { icon: 'edit', label: '接着写（⌘J）', mode: 'continue' },
   { icon: 'wand', label: '润色选区', mode: 'rewrite' },
+  { icon: 'sparkles', label: '全文润色排版', mode: 'polish-doc' },
   { icon: 'scissors', label: '精简选区', mode: 'rewrite', instruction: '压缩到原文的一半长度，保留全部关键信息' },
   { icon: 'pin', label: '总结本文', mode: 'summarize' },
   { icon: 'globe', label: '翻译', mode: 'translate' },
@@ -901,6 +903,98 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
   }
   runAIRef.current = runAI
 
+  const runDocPolishRef = useRef<() => Promise<void>>(async () => {})
+  const runDocPolish = async () => {
+    const view = viewRef.current
+    if (!view) return
+    const ai = settings.ai
+    if (!ai.enabled) {
+      vault.flash('先在设置里启用 AI 并填写接口信息', 'error')
+      vault.setModal({ settingsOpen: true })
+      return
+    }
+    if (settings.privacyLocalOnly && !isLocalProvider(ai.provider)) {
+      vault.flash('隐私模式已开启：请切换到本地 Ollama / LM Studio，或关闭隐私模式', 'error')
+      vault.setModal({ settingsOpen: true })
+      return
+    }
+    if (needsApiKey(ai.provider) && !apiKeyFor(ai)) {
+      const loaded = await vault.ensureProviderKey(ai.provider)
+      if (!loaded) {
+        vault.flash(`缺少 ${ai.provider} 的 API Key，请到设置里填写`, 'error')
+        vault.setModal({ settingsOpen: true })
+        return
+      }
+    }
+    const full = view.state.doc.toString()
+    const fm = parseFrontMatter(full)
+    const body = fm.body
+    if (!body.trim()) {
+      vault.flash('正文为空，没有可润色的内容', 'info')
+      return
+    }
+    if (body.length > 30_000) {
+      vault.flash('正文超过 3 万字符，建议先按章节拆分再润色', 'error')
+      return
+    }
+    if (!vault.checkAiBudget(body.length + 1200)) return
+    const readyAi = vault.state.settings.ai
+    const budget = Math.max(readyAi.contextChars || 6000, Math.min(24_000, body.length + 800))
+    const messages = buildMessages('polish-doc', {
+      title: doc.title,
+      headings: headings.map((h) => h.text),
+      selection: body,
+      before: '',
+      after: '',
+      memories: loadMemories().map((m) => m.text),
+      persona: settings.persona,
+      budget,
+    })
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    vault.setAiBusy(true)
+    vault.pet('thinking', '我先通读一遍，再统一排版…', 0)
+    setSuggestion({
+      id: String(Date.now()),
+      mode: 'rewrite',
+      title: '全文润色排版',
+      text: '',
+      original: body,
+      streaming: true,
+      range: { from: full.length - body.length, to: full.length },
+      sources: [{ docId: doc.id, title: doc.title, line: 0, excerpt: '整篇正文' }],
+    })
+    try {
+      const inputChars = JSON.stringify(messages).length
+      const text = await streamChat(readyAi, messages, (delta) => {
+        deltaBuf.current += delta
+        if (!deltaRaf.current) {
+          deltaRaf.current = requestAnimationFrame(() => {
+            deltaRaf.current = 0
+            const chunk = deltaBuf.current
+            deltaBuf.current = ''
+            if (!chunk) return
+            setSuggestion((s) => (s ? { ...s, text: s.text + chunk } : s))
+          })
+        }
+      }, controller.signal, { cache: false })
+      vault.recordUsage(inputChars, text.length)
+      setSuggestion((s) => (s ? { ...s, streaming: false } : s))
+      vault.setAiBusy(false)
+      vault.pet('happy', '全文排好了，确认 diff 再采纳', 2600)
+    } catch (e: any) {
+      if (e?.name === 'AbortError') {
+        vault.setAiBusy(false)
+        return
+      }
+      setSuggestion((s) => (s ? { ...s, streaming: false, error: e?.message ?? String(e) } : s))
+      vault.setAiBusy(false)
+      vault.pet('surprised', '排版时出错了', 2400)
+    }
+  }
+  runDocPolishRef.current = runDocPolish
+
   const runFigureRef = useRef<() => Promise<void>>(async () => {})
   const runFigure = async () => {
     const view = viewRef.current
@@ -1435,6 +1529,10 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
         void runCoverRef.current()
         return
       }
+      if (detail.mode === 'polish-doc') {
+        void runDocPolishRef.current()
+        return
+      }
       if (detail.mode === 'undo-ai') {
         void undoAiRef.current()
         return
@@ -1523,7 +1621,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
       const block = suggestion.mode === 'summarize' ? `\n\n${text}\n\n` : `\n\n${text}`
       view.dispatch({ changes: { from: at, insert: block }, selection: { anchor: at + block.length } })
     }
-    recordAiEdit(doc.id, `AI ${MODE_LABEL[suggestion.mode] ?? '写入'}`, beforeAi, view.state.doc.toString())
+    recordAiEdit(doc.id, suggestion.title === '全文润色排版' ? 'AI 全文润色排版' : `AI ${MODE_LABEL[suggestion.mode] ?? '写入'}`, beforeAi, view.state.doc.toString())
     setSuggestion(null)
     saveNow(view.state.doc.toString(), true)
     vault.pet('happy', '采纳啦！✦', 2000)
@@ -1691,7 +1789,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
           }}
         >
           {AI_MENU.map((item) => (
-            <button key={item.label} type="button" role="menuitem" onClick={() => (item.mode === 'figure' ? runFigure() : item.mode === 'figure-plan' ? runDocumentPlan() : item.mode === 'cover' ? runCover() : item.mode === 'undo-ai' ? void undoAi() : item.mode === 'ai-log' ? window.dispatchEvent(new Event('inkspire:ai-log')) : void runAI(item.mode, item.instruction))}>
+            <button key={item.label} type="button" role="menuitem" onClick={() => (item.mode === 'figure' ? runFigure() : item.mode === 'figure-plan' ? runDocumentPlan() : item.mode === 'cover' ? runCover() : item.mode === 'polish-doc' ? void runDocPolish() : item.mode === 'undo-ai' ? void undoAi() : item.mode === 'ai-log' ? window.dispatchEvent(new Event('inkspire:ai-log')) : void runAI(item.mode, item.instruction))}>
               <Icon name={item.icon} size={15} />
               <span>{item.label}</span>
             </button>

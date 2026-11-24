@@ -77,6 +77,11 @@ export function CommandPalette({ onClose, onOpenDoc, onNewDoc, onOpenImport, onO
         run: () => { onClose(); window.dispatchEvent(new CustomEvent('inkspire:ai', { detail: { mode: 'rewrite' } })) },
       },
       {
+        label: 'AI：全文润色并统一排版',
+        hint: '保留事实与结构，输出完整 Markdown 供 diff 确认',
+        run: () => { onClose(); window.dispatchEvent(new CustomEvent('inkspire:ai', { detail: { mode: 'polish-doc' } })) },
+      },
+      {
         label: 'AI：解释选中文字',
         run: () => { onClose(); window.dispatchEvent(new CustomEvent('inkspire:ai', { detail: { mode: 'custom', instruction: '用简洁的中文解释选中的文字，指出可能的歧义或问题。' } })) },
       },
