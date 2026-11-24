@@ -116,6 +116,8 @@ export interface VaultState {
   aiUsage: { calls: number; inputChars: number; outputChars: number }
   aiUsageDay: { day: string; chars: number; calls: number }
   aiLedger: AiLedgerEntry[]
+  /** 文件树手动顺序：path -> order；编辑正文不会改变它 */
+  treeOrder: Record<string, number>
   blocksByPath: Record<string, RustBlock[]>
   folders: string[]
 }
@@ -227,6 +229,39 @@ function semanticSnippet(body: string, query: string): { line: number; text: str
   return { line: Math.max(0, line), text }
 }
 
+function readTreeOrder(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem('inkspire:treeOrder')
+    const parsed = raw ? JSON.parse(raw) : {}
+    if (!parsed || typeof parsed !== 'object') return {}
+    const out: Record<string, number> = {}
+    for (const [path, value] of Object.entries(parsed)) {
+      const n = Number(value)
+      if (path && Number.isFinite(n)) out[path] = n
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeTreeOrder(order: Record<string, number>) {
+  try {
+    localStorage.setItem('inkspire:treeOrder', JSON.stringify(order))
+  } catch {
+    /* ignore */
+  }
+}
+
+function parentDir(path: string): string {
+  const at = path.lastIndexOf('/')
+  return at < 0 ? '' : path.slice(0, at)
+}
+
+function basename(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1)
+}
+
 function docFromFile(f: VaultFile, meta?: DocMetaCache): Document {
   const { fm } = parseFrontMatter(f.content)
   return {
@@ -269,6 +304,7 @@ export class Vault {
     aiUsage: { calls: 0, inputChars: 0, outputChars: 0 },
     aiUsageDay: { day: dayKey(), chars: 0, calls: 0 },
     aiLedger: [],
+    treeOrder: {},
     blocksByPath: {},
     folders: [],
   }
@@ -506,8 +542,9 @@ export class Vault {
     } catch {
       /* ignore */
     }
+    const treeOrder = this.mergeTreeOrder(list)
     this.applyTheme(settings)
-    this.set({ docs: list, settings, ready: true, activeId: active?.id ?? null, savedAt: active?.updatedAt ?? 0, folders, aiUsageDay, aiLedger })
+    this.set({ docs: list, settings, ready: true, activeId: active?.id ?? null, savedAt: active?.updatedAt ?? 0, folders, aiUsageDay, aiLedger, treeOrder })
     if (active) this.pushRecent(active.id)
   }
 
@@ -580,10 +617,12 @@ export class Vault {
     } catch {
       /* ignore */
     }
+    const treeOrder = this.mergeTreeOrder(list)
     this.set({
       aiUsage,
       aiUsageDay,
       aiLedger,
+      treeOrder,
       docs: list,
       settings,
       ready: true,
@@ -931,6 +970,93 @@ export class Vault {
     return doc
   }
 
+  /** 文件树顺序：新建文档放最前，导入书籍按章节顺序追加 */
+  nextTreeOrder(edge: 'top' | 'bottom' = 'bottom'): number {
+    const values = Object.values(this.state.treeOrder)
+    if (!values.length) return edge === 'top' ? 0 : 1000
+    return edge === 'top' ? Math.min(...values) - 1000 : Math.max(...values) + 1000
+  }
+
+  private persistTreeOrder(order: Record<string, number>) {
+    this.set({ treeOrder: order })
+    writeTreeOrder(order)
+  }
+
+  private mergeTreeOrder(docs: Document[]): Record<string, number> {
+    const stored = readTreeOrder()
+    const paths = new Set(docs.map((d) => d.path))
+    let changed = false
+    for (const path of Object.keys(stored)) {
+      if (!paths.has(path)) {
+        delete stored[path]
+        changed = true
+      }
+    }
+    let next = Math.max(0, ...Object.values(stored))
+    for (const doc of docs) {
+      if (stored[doc.path] !== undefined) continue
+      next += 1000
+      stored[doc.path] = next
+      changed = true
+    }
+    if (changed || Object.keys(stored).length !== docs.length) writeTreeOrder(stored)
+    return stored
+  }
+
+  private orderedDocsIn(dir: string): Document[] {
+    return this.state.docs
+      .filter((doc) => parentDir(doc.path) === dir)
+      .sort((a, b) => {
+        const oa = this.state.treeOrder[a.path]
+        const ob = this.state.treeOrder[b.path]
+        if (oa !== undefined && ob !== undefined) return oa - ob
+        if (oa !== undefined) return -1
+        if (ob !== undefined) return 1
+        return b.updatedAt - a.updatedAt
+      })
+  }
+
+  /** 拖到文件夹：移动到目录末尾；拖到另一个文档时再按位置排序 */
+  async moveDocToFolder(id: string, folder: string): Promise<string | null> {
+    const doc = this.getDoc(id)
+    if (!doc) return null
+    const next = folder ? `${folder}/${basename(doc.path)}` : basename(doc.path)
+    if (next === doc.path) return doc.path
+    await this.rename(id, next)
+    const moved = this.state.docs.find((d) => d.id === (isTauri ? next : id))
+    if (!moved || moved.path !== next) return null
+    const order = { ...this.state.treeOrder }
+    order[moved.path] = this.nextTreeOrder('bottom')
+    this.persistTreeOrder(order)
+    return moved.path
+  }
+
+  /** 手动拖动排序；跨文件夹时先移动文件，再按目标位置重排 */
+  async reorderDoc(dragId: string, targetId: string, after: boolean): Promise<boolean> {
+    const drag = this.getDoc(dragId)
+    const target = this.getDoc(targetId)
+    if (!drag || !target || drag.id === target.id) return false
+    const targetDir = parentDir(target.path)
+    let movedPath = drag.path
+    if (parentDir(drag.path) !== targetDir) {
+      const nextPath = await this.moveDocToFolder(drag.id, targetDir)
+      if (!nextPath) return false
+      movedPath = nextPath
+    }
+    const dragged = this.state.docs.find((d) => d.path === movedPath)
+    if (!dragged) return false
+    const siblings = this.orderedDocsIn(targetDir).filter((d) => d.id !== dragged.id)
+    const at = siblings.findIndex((d) => d.id === target.id)
+    const insertAt = at < 0 ? siblings.length : at + (after ? 1 : 0)
+    siblings.splice(insertAt, 0, dragged)
+    const order = { ...this.state.treeOrder }
+    siblings.forEach((doc, i) => {
+      order[doc.path] = (i + 1) * 1000
+    })
+    this.persistTreeOrder(order)
+    return true
+  }
+
   async createDoc(opts: { path?: string; content?: string; title?: string; frontMatter?: Partial<FrontMatter> } = {}) {
     const now = Date.now()
     const title = opts.title ?? '未命名'
@@ -963,6 +1089,8 @@ export class Vault {
     if (isTauri) await platform.vaultWrite(path, content)
     else await idb.put('docs', doc)
     this.persistMeta(doc)
+    const order = { ...this.state.treeOrder, [doc.path]: this.nextTreeOrder('top') }
+    this.persistTreeOrder(order)
     this.set({ docs: [doc, ...this.state.docs] })
     await this.setActive(doc.id)
     this.flash('新建文档', 'success')
@@ -970,7 +1098,7 @@ export class Vault {
     return doc
   }
 
-  async importDoc(doc: Omit<Document, 'id' | 'createdAt' | 'updatedAt' | 'versions' | 'favorite' | 'title' | 'wordCount' | 'preview'> & { title?: string }) {
+  async importDoc(doc: Omit<Document, 'id' | 'createdAt' | 'updatedAt' | 'versions' | 'favorite' | 'title' | 'wordCount' | 'preview'> & { title?: string }, treeOrder?: number) {
     const now = Date.now()
     let path = ensureMd(doc.path)
     let n = 2
@@ -995,6 +1123,8 @@ export class Vault {
     if (isTauri) await platform.vaultWrite(path, doc.content)
     else await idb.put('docs', full)
     this.persistMeta(full)
+    const order = { ...this.state.treeOrder, [full.path]: treeOrder ?? this.nextTreeOrder('bottom') }
+    this.persistTreeOrder(order)
     this.set({ docs: [full, ...this.state.docs] })
     return full
   }
@@ -1096,9 +1226,11 @@ export class Vault {
     const prevActive = this.state.activeId ? prev.get(this.state.docs.find((d) => d.id === this.state.activeId)?.path ?? '') : undefined
     const active = next.find((d) => d.id === this.state.activeId) ?? next[0]
     const activeChanged = active?.id !== this.state.activeId || (!!prevActive && prevActive.content !== active?.content)
+    const treeOrder = this.mergeTreeOrder(next)
     this.set({
       docs: next,
       folders,
+      treeOrder,
       activeId: active?.id ?? null,
       savedAt: active?.updatedAt ?? 0,
     })
@@ -1123,6 +1255,22 @@ export class Vault {
     }
     const affected = this.state.docs.filter((d) => d.path === oldPath || d.path.startsWith(`${oldPath}/`))
     const active = this.state.docs.find((d) => d.id === this.state.activeId)
+    const migrateOrder = () => {
+      const order = { ...this.state.treeOrder }
+      let changed = false
+      for (const key of Object.keys(order)) {
+        if (key === oldPath || key.startsWith(`${oldPath}/`)) {
+          order[nextPath + key.slice(oldPath.length)] = order[key]
+          delete order[key]
+          changed = true
+        }
+      }
+      if (changed) {
+        this.set({ treeOrder: order })
+        writeTreeOrder(order)
+      }
+      return order
+    }
 
     if (isTauri) {
       try {
@@ -1143,6 +1291,7 @@ export class Vault {
         const newPath = nextPath + active.path.slice(oldPath.length)
         localStorage.setItem('inkspire:lastDoc', newPath)
       }
+      migrateOrder()
       this.flash('文件夹已重命名，正在重新加载…', 'success')
       window.setTimeout(() => window.location.reload(), 300)
       return
@@ -1164,7 +1313,8 @@ export class Vault {
       if (affected.some((a) => a.id === doc.id)) await idb.put('docs', doc)
     }
     const folders = this.state.folders.map((f) => (f === oldPath || f.startsWith(`${oldPath}/`) ? nextPath + f.slice(oldPath.length) : f))
-    this.set({ docs: updated, folders, savedAt: Date.now() })
+    const treeOrder = migrateOrder()
+    this.set({ docs: updated, folders, treeOrder, savedAt: Date.now() })
     this.flash('文件夹已重命名', 'success')
     window.dispatchEvent(new Event('inkspire:vault-restored'))
   }
@@ -1202,6 +1352,12 @@ export class Vault {
         return
       }
     }
+    const order = { ...this.state.treeOrder }
+    if (order[doc.path] !== undefined) {
+      order[next.path] = order[doc.path]
+      delete order[doc.path]
+      this.persistTreeOrder(order)
+    }
     this.set({
       docs: this.state.docs.map((d) => (d.id === id ? next : d)),
       activeId: this.state.activeId === id ? nextId : this.state.activeId,
@@ -1209,6 +1365,7 @@ export class Vault {
     if (!isTauri) await idb.put('docs', next)
     this.persistMeta(next)
     localStorage.setItem('inkspire:lastDoc', nextId)
+    if (this.state.activeId === nextId) window.dispatchEvent(new Event('inkspire:vault-restored'))
     this.flash('已重命名', 'success')
   }
 
@@ -1237,6 +1394,9 @@ export class Vault {
         }
       }
       const remaining = this.state.docs.filter((d) => d.id !== id)
+      const order = { ...this.state.treeOrder }
+      delete order[doc.path]
+      this.persistTreeOrder(order)
       this.set({ docs: remaining })
       if (!isTauri) await idb.del('docs', id)
       if (this.state.activeId === id) {
@@ -1368,7 +1528,11 @@ export class Vault {
           }
         }
         if (best !== -1) {
-          hits.push({ docId: doc.id, line: i, text: lines[i].slice(0, 220), start: best, length: bestLen, score: 1 })
+          // 搜索结果不展示 base64 图片正文，否则一条命中会把整段 data URI 塞进侧栏
+          const cleanText = lines[i]
+            .replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '[本地图片]')
+            .slice(0, 220)
+          hits.push({ docId: doc.id, line: i, text: cleanText, start: best, length: bestLen, score: 1 })
         }
       }
       if (!hits.length) hits.push({ docId: doc.id, line: 0, text: doc.preview || doc.title, start: 0, length: 0, score: 0 })
@@ -1520,7 +1684,7 @@ export class Vault {
     return out
   }
 
-  async importBackup(data: { docs: Document[]; settings?: AppSettings }) {
+  async importBackup(data: { docs: Document[]; settings?: AppSettings; treeOrder?: Record<string, number> }) {
     const byPath = new Map<string, Document>()
     for (const d of data.docs ?? []) {
       if (!d || !d.path || typeof d.content !== 'string') continue
@@ -1558,11 +1722,25 @@ export class Vault {
     const sorted = [...docs].sort((a, b) => b.updatedAt - a.updatedAt)
     const active = sorted[0]
     const folders = [...new Set(sorted.flatMap((d) => d.path.split('/').slice(0, -1).map((_, i, arr) => arr.slice(0, i + 1).join('/'))))]
+    const savedOrder = data.treeOrder ?? {}
+    const treeOrder: Record<string, number> = {}
+    let nextOrder = Math.max(0, ...Object.values(savedOrder).filter((v) => Number.isFinite(v))) + 1000
+    for (const doc of sorted) {
+      const value = Number(savedOrder[doc.path])
+      if (Number.isFinite(value)) {
+        treeOrder[doc.path] = value
+      } else {
+        nextOrder += 1000
+        treeOrder[doc.path] = nextOrder
+      }
+    }
+    writeTreeOrder(treeOrder)
     localStorage.setItem('inkspire:seeded', '1')
     this.discardPending = true
     this.set({
       docs: sorted,
       folders,
+      treeOrder,
       activeId: active?.id ?? null,
       savedAt: active?.updatedAt ?? 0,
       savedAtByDoc: Object.fromEntries(sorted.map((d) => [d.id, d.updatedAt])),
@@ -1579,7 +1757,7 @@ export class Vault {
       settings.ai.apiKey = ''
       settings.ai.keys = {}
     }
-    const data = { app: 'inkspire', version: 1, exportedAt: Date.now(), docs: this.state.docs, settings }
+    const data = { app: 'inkspire', version: 1, exportedAt: Date.now(), docs: this.state.docs, settings, treeOrder: this.state.treeOrder }
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
     const name = `inkspire-backup-${new Date().toISOString().slice(0, 10)}.json`
     try {

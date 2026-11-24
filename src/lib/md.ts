@@ -195,9 +195,25 @@ export function extractHeadings(text: string): Heading[] {
 
 const WIKI_RE = /\[\[([^\]\n]+?)\]\]/g
 
+/** 把代码围栏与行内代码替换成等长空格，避免把示例里的 [[链接]] / #标签 当成真实内容 */
+function maskCode(text: string): string {
+  const lines = text.split('\n')
+  let fence = false
+  return lines
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        fence = !fence
+        return ' '.repeat(line.length)
+      }
+      if (fence) return ' '.repeat(line.length)
+      return line.replace(/(`+)[^`\n]*\1/g, (m) => ' '.repeat(m.length))
+    })
+    .join('\n')
+}
+
 export function extractWikiLinks(text: string): WikiLink[] {
   const out: WikiLink[] = []
-  const body = stripFrontMatter(text)
+  const body = maskCode(stripFrontMatter(text))
   let m: RegExpExecArray | null
   WIKI_RE.lastIndex = 0
   while ((m = WIKI_RE.exec(body))) {
@@ -217,12 +233,11 @@ export function extractWikiLinks(text: string): WikiLink[] {
 }
 
 export function extractTags(text: string): string[] {
-  const body = stripFrontMatter(text).replace(/```[\s\S]*?```/g, ' ')
+  const body = maskCode(stripFrontMatter(text))
   const set = new Set<string>()
   const re = /(^|[\s(（])#([\p{L}\p{N}_/\-]{1,64})/gu
   let m: RegExpExecArray | null
   while ((m = re.exec(body))) {
-    if (m.index > 0 && body[m.index - 1] === '\n') continue
     const tag = m[2].toLowerCase()
     if (/^\d+$/.test(tag)) continue
     set.add(tag)

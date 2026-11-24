@@ -177,9 +177,12 @@ export function ImportModal({ onClose, initialFiles }: { onClose: () => void; in
         return `[[${target}${text && text !== target ? `|${text}` : ''}]]`
       })
 
-    // 每篇文档会插到列表最前；倒序写入，最终章节顺序才和书里一致
-    for (const { doc } of [...pending].reverse()) {
-      const created = await vault.importDoc({ ...doc, content: repairLinks(doc.content) } as any)
+    // 每篇文档会插到列表最前；倒序写入，最终章节顺序才和书里一致。
+    // 同时给同批章节分配递增顺序，之后编辑正文不会把文章顶到最上面。
+    const baseOrder = vault.nextTreeOrder('bottom')
+    for (let i = pending.length - 1; i >= 0; i--) {
+      const { doc } = pending[i]
+      const created = await vault.importDoc({ ...doc, content: repairLinks(doc.content) } as any, baseOrder + i * 1000)
       firstId = created.id
       count++
     }

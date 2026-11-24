@@ -28,11 +28,11 @@ import { saveAsset, dataUrlToBlob } from '../lib/assets'
 import { checkRenderedFigure } from '../lib/figures/domCheck'
 import { findAiEdit, latestAiEdit, recordAiEdit, removeAiEdit, removeAiEditsFrom, type AiEdit } from '../lib/aiEdits'
 import { confirmDialog } from '../lib/dialog'
+import { DiffView } from './ui/DiffView'
 import { clearFigurePlan, loadFigurePlan, saveFigurePlan } from '../lib/figurePlanStore'
 import { coverBudget, recordCover } from '../lib/coverUsage'
 import { extractHeadings, parseFrontMatter, formatTime } from '../lib/md'
 import type { AISuggestion, Document, Mood, SourceRef } from '../types'
-import { diffWords } from '../lib/diff'
 import { FIGURE_LABEL, FIGURE_PLAN_PROMPT, FIGURE_PROMPT, figureExportSvg, figureMarkdown, parseFigurePlan, parseFigureResponse, renderFigureSvg, svgToPngBlob, validateFigure, type FigureIssue, type FigureSpec } from '../lib/figures'
 import { Checkbox } from './ui/Checkbox'
 import { downloadBlob } from '../lib/export'
@@ -204,6 +204,30 @@ const SLASH_ITEMS: SlashItem[] = [
   { icon: 'compass', label: '生成图解', hint: '/figure', keys: 'figure 图解 图表', ai: 'figure' },
   { icon: 'book', label: '打开今日笔记', hint: '/daily', keys: 'daily 今日 日记 笔记', action: 'daily' },
 ]
+
+/** 长文在内部按段落切片润色；不限制用户输入，也不要求用户手动分章 */
+function splitBodyForPolish(body: string, maxChars = 9000): string[] {
+  const lines = body.split('\n')
+  const chunks: string[] = []
+  let buf: string[] = []
+  let len = 0
+  let inFence = false
+  const flush = () => {
+    const text = buf.join('\n').trim()
+    if (text) chunks.push(text)
+    buf = []
+    len = 0
+  }
+  for (const line of lines) {
+    const isFence = /^\s*(```|~~~)/.test(line)
+    if (isFence) inFence = !inFence
+    buf.push(line)
+    len += line.length + 1
+    if (len >= maxChars && !inFence && (!line.trim() || len >= maxChars * 1.5)) flush()
+  }
+  flush()
+  return chunks.length ? chunks : [body]
+}
 
 const TABLE_MARKDOWN = '| 列一 | 列二 |\n| --- | --- |\n|  |  |'
 
@@ -933,28 +957,14 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
       vault.flash('正文为空，没有可润色的内容', 'info')
       return
     }
-    if (body.length > 30_000) {
-      vault.flash('正文超过 3 万字符，建议先按章节拆分再润色', 'error')
-      return
-    }
-    if (!vault.checkAiBudget(body.length + 1200)) return
+    const chunks = splitBodyForPolish(body)
+    if (!vault.checkAiBudget(body.length + chunks.length * 700)) return
     const readyAi = vault.state.settings.ai
-    const budget = Math.max(readyAi.contextChars || 6000, Math.min(24_000, body.length + 800))
-    const messages = buildMessages('polish-doc', {
-      title: doc.title,
-      headings: headings.map((h) => h.text),
-      selection: body,
-      before: '',
-      after: '',
-      memories: loadMemories().map((m) => m.text),
-      persona: settings.persona,
-      budget,
-    })
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
     vault.setAiBusy(true)
-    vault.pet('thinking', '我先通读一遍，再统一排版…', 0)
+    vault.pet('thinking', chunks.length > 1 ? `我先通读全文，分 ${chunks.length} 段处理…` : '我先通读一遍，再统一排版…', 0)
     setSuggestion({
       id: String(Date.now()),
       mode: 'rewrite',
@@ -966,20 +976,33 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
       sources: [{ docId: doc.id, title: doc.title, line: 0, excerpt: '整篇正文' }],
     })
     try {
-      const inputChars = JSON.stringify(messages).length
-      const text = await streamChat(readyAi, messages, (delta) => {
-        deltaBuf.current += delta
-        if (!deltaRaf.current) {
-          deltaRaf.current = requestAnimationFrame(() => {
-            deltaRaf.current = 0
-            const chunk = deltaBuf.current
-            deltaBuf.current = ''
-            if (!chunk) return
-            setSuggestion((s) => (s ? { ...s, text: s.text + chunk } : s))
-          })
+      let acc = ''
+      const push = (delta: string) => {
+        acc += delta
+        setSuggestion((s) => (s ? { ...s, text: acc } : s))
+      }
+      for (let i = 0; i < chunks.length; i++) {
+        const budget = Math.max(readyAi.contextChars || 6000, Math.min(24_000, chunks[i].length + 800))
+        const messages = buildMessages(chunks.length === 1 ? 'polish-doc' : 'polish-doc-chunk', {
+          title: doc.title,
+          headings: headings.map((h) => h.text),
+          selection: chunks[i],
+          before: '',
+          after: '',
+          memories: loadMemories().map((m) => m.text),
+          persona: settings.persona,
+          budget,
+        })
+        const before = acc.length
+        await streamChat(readyAi, messages, push, controller.signal, { cache: false })
+        if (controller.signal.aborted) return
+        vault.recordUsage(JSON.stringify(messages).length, Math.max(0, acc.length - before))
+        if (i < chunks.length - 1) {
+          acc += acc.endsWith('\n\n') ? '' : '\n\n'
+          setSuggestion((s) => (s ? { ...s, text: acc } : s))
+          vault.pet('thinking', `已经处理 ${i + 1}/${chunks.length} 段…`, 0)
         }
-      }, controller.signal, { cache: false })
-      vault.recordUsage(inputChars, text.length)
+      }
       setSuggestion((s) => (s ? { ...s, streaming: false } : s))
       vault.setAiBusy(false)
       vault.pet('happy', '全文排好了，确认 diff 再采纳', 2600)
@@ -1935,17 +1958,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
           <div className="ai-body">
             {suggestion.original && suggestion.streaming && <span className="orig">{suggestion.original}</span>}
             {suggestion.original && !suggestion.streaming ? (
-              <div className="ai-diff">
-                {diffWords(suggestion.original, suggestion.text).map((chunk, i) =>
-                  chunk.op === 'equal' ? (
-                    <span key={i}>{chunk.text}</span>
-                  ) : chunk.op === 'remove' ? (
-                    <del key={i}>{chunk.text}</del>
-                  ) : (
-                    <ins key={i}>{chunk.text}</ins>
-                  ),
-                )}
-              </div>
+              <DiffView before={suggestion.original} after={suggestion.text} className="ai-diff" />
             ) : (
               <span className={suggestion.streaming ? 'ai-cursor' : ''}>{suggestion.text || '…'}</span>
             )}

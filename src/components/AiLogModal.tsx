@@ -3,7 +3,8 @@ import { useDialogA11y } from './ui/useDialogA11y'
 import { Momo } from './Momo'
 import { Icon } from './ui/Icon'
 import { listAiEdits, type AiEdit } from '../lib/aiEdits'
-import { diffExcerpt, diffLines, diffStats } from '../lib/textDiff'
+import { diffLines, diffStats } from '../lib/textDiff'
+import { DiffView } from './ui/DiffView'
 
 interface Props {
   docId: string
@@ -33,10 +34,9 @@ export function AiLogModal({ docId, docTitle, onRestore, onClose }: Props) {
   }, [docId])
 
   const active = entries.find((row) => row.id === expanded) ?? null
-  const diff = useMemo(() => {
+  const stats = useMemo(() => {
     if (!active) return null
-    const rows = diffLines(active.before, active.after)
-    return { rows: diffExcerpt(rows), stats: diffStats(rows) }
+    return diffStats(diffLines(active.before, active.after))
   }, [active])
 
   const restore = async (entry: AiEdit) => {
@@ -92,20 +92,12 @@ export function AiLogModal({ docId, docTitle, onRestore, onClose }: Props) {
                     {busy === entry.id ? '回放中…' : '回到这次之前'}
                   </button>
                 </div>
-                {isOpen && diff && (
+                {isOpen && stats && (
                   <div className="ai-log-diff-wrap">
                     <div className="ai-log-stats">
-                      新增 {diff.stats.added} 行 · 删除 {diff.stats.removed} 行 · 未变 {diff.stats.unchanged} 行
+                      新增 {stats.added} 行 · 删除 {stats.removed} 行 · 未变 {stats.unchanged} 行
                     </div>
-                    <pre className="ai-log-diff" aria-label="逐行 diff">
-                      {diff.rows.map((row, i) => (
-                        <span key={i} className={`diff-${row.type}`}>
-                          {row.type === 'add' ? '+ ' : row.type === 'del' ? '- ' : '  '}
-                          {row.text || ' '}
-                          {'\n'}
-                        </span>
-                      ))}
-                    </pre>
+                    <DiffView before={entry.before} after={entry.after} className="ai-log-diff" />
                   </div>
                 )}
               </div>

@@ -100,3 +100,130 @@ export function diffExcerpt(rows: DiffRow[], context = 3, maxRows = 220): DiffRo
   }
   return out
 }
+
+export type ReviewRow =
+  | { type: 'same'; text: string }
+  | { type: 'add'; text: string }
+  | { type: 'del'; text: string }
+  | { type: 'mod'; before: string; after: string; beforeParts: DiffWordChunk[]; afterParts: DiffWordChunk[] }
+
+type DiffWordChunk = { op: 'equal' | 'add' | 'remove'; text: string }
+
+function tokensOf(line: string): Set<string> {
+  return new Set((line.toLowerCase().match(/[\u4e00-\u9fa5]|[a-z0-9]+/g) ?? []))
+}
+
+function lineSimilarity(a: string, b: string): number {
+  if (!a.trim() && !b.trim()) return 1
+  const sa = tokensOf(a)
+  const sb = tokensOf(b)
+  if (!sa.size || !sb.size) return 0
+  let common = 0
+  for (const token of sa) if (sb.has(token)) common++
+  return common / Math.max(sa.size, sb.size)
+}
+
+function wordDiff(before: string, after: string): DiffWordChunk[] {
+  // 单行通常很短；这里用字符级 LCS，避免长文整体退化成“全删全增”
+  const tokenize = (text: string) => text.match(/[\u4e00-\u9fa5]|[A-Za-z0-9_]+|\s+|[^\s]/g) ?? []
+  const a = tokenize(before)
+  const b = tokenize(after)
+  if (!a.length) return after ? [{ op: 'add', text: after }] : []
+  if (!b.length) return before ? [{ op: 'remove', text: before }] : []
+  if (a.length * b.length > 600_000) {
+    return [
+      ...(before ? [{ op: 'remove' as const, text: before }] : []),
+      ...(after ? [{ op: 'add' as const, text: after }] : []),
+    ]
+  }
+  const dp: Uint32Array[] = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1))
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1])
+    }
+  }
+  const chunks: DiffWordChunk[] = []
+  const push = (op: DiffWordChunk['op'], text: string) => {
+    if (!text) return
+    const last = chunks[chunks.length - 1]
+    if (last && last.op === op) last.text += text
+    else chunks.push({ op, text })
+  }
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      push('equal', a[i])
+      i++
+      j++
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      push('remove', a[i++])
+    } else {
+      push('add', b[j++])
+    }
+  }
+  while (i < a.length) push('remove', a[i++])
+  while (j < b.length) push('add', b[j++])
+  return chunks
+}
+
+/** 行级 diff + 相似行配对 + 行内词级高亮，适合整篇润色后的审阅 */
+export function diffReview(before: string, after: string, maxRows = 500): ReviewRow[] {
+  const lines = diffLines(before, after)
+  const out: ReviewRow[] = []
+  let i = 0
+  while (i < lines.length && out.length < maxRows) {
+    const row = lines[i]
+    if (row.type === 'same') {
+      out.push({ type: 'same', text: row.text })
+      i++
+      continue
+    }
+    const dels: string[] = []
+    const adds: string[] = []
+    while (i < lines.length && lines[i].type !== 'same') {
+      if (lines[i].type === 'del') dels.push(lines[i].text)
+      else adds.push(lines[i].text)
+      i++
+    }
+    const usedAdds = new Set<number>()
+    // 大段改动按位置配对，避免长文里 O(删除行 × 新增行) 的开销
+    const pairByIndex = dels.length === adds.length || dels.length * adds.length > 20_000
+    for (let d = 0; d < dels.length && out.length < maxRows; d++) {
+      let best = -1
+      let bestScore = 0
+      if (pairByIndex) {
+        if (d < adds.length) {
+          best = d
+          bestScore = lineSimilarity(dels[d], adds[d])
+        }
+      } else {
+        for (let a = 0; a < adds.length; a++) {
+          if (usedAdds.has(a)) continue
+          const score = lineSimilarity(dels[d], adds[a])
+          if (score > bestScore) {
+            bestScore = score
+            best = a
+          }
+        }
+      }
+      if (best >= 0 && (bestScore >= 0.18 || dels.length === adds.length || pairByIndex)) {
+        usedAdds.add(best)
+        const parts = wordDiff(dels[d], adds[best])
+        out.push({
+          type: 'mod',
+          before: dels[d],
+          after: adds[best],
+          beforeParts: parts.filter((c) => c.op !== 'add'),
+          afterParts: parts.filter((c) => c.op !== 'remove'),
+        })
+      } else {
+        out.push({ type: 'del', text: dels[d] })
+      }
+    }
+    for (let a = 0; a < adds.length && out.length < maxRows; a++) {
+      if (!usedAdds.has(a)) out.push({ type: 'add', text: adds[a] })
+    }
+  }
+  return out
+}

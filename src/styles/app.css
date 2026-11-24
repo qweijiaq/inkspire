@@ -6982,3 +6982,79 @@ button svg,
     margin-left: 0;
   }
 }
+
+/* 审阅 diff：相同行降噪，修改行配对并高亮词级变化 */
+.diff-view {
+  margin: 0;
+  max-height: 340px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--code-bg);
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-view .diff-same {
+  display: block;
+  opacity: 0.72;
+}
+.diff-view .diff-add {
+  display: block;
+  color: var(--mint-strong);
+  background: var(--mint-soft);
+}
+.diff-view .diff-del {
+  display: block;
+  color: var(--coral-strong);
+  background: var(--coral-soft);
+}
+.diff-view .diff-mod {
+  display: block;
+  margin: 3px 0;
+  border-left: 3px solid var(--brand);
+  padding-left: 6px;
+}
+.diff-view .diff-mod .diff-del,
+.diff-view .diff-mod .diff-add {
+  display: block;
+}
+.diff-view del {
+  text-decoration: line-through;
+  opacity: 0.85;
+}
+.diff-view ins {
+  text-decoration: none;
+  font-weight: 800;
+}
+.ai-diff.diff-view {
+  max-height: 300px;
+  border: 1.5px solid var(--line-soft);
+  border-radius: 9px;
+}
+
+/* 文件树拖动排序 */
+.tree-row[draggable='true'] {
+  cursor: grab;
+}
+.tree-row.dragging {
+  opacity: 0.45;
+}
+.tree-row.drop-before {
+  box-shadow: inset 0 2px 0 var(--brand);
+}
+.tree-row.drop-after {
+  box-shadow: inset 0 -2px 0 var(--brand);
+}
+.tree-row.folder-row.drop-inside {
+  background: var(--brand-soft);
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+.side-section-title.drop-root {
+  background: var(--brand-soft);
+  outline: 1.5px dashed var(--brand);
+  outline-offset: -2px;
+}

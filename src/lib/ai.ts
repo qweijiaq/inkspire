@@ -58,6 +58,27 @@ ${ctx.headings.length ? `已有大纲：${ctx.headings.slice(0, 12).join(' / ')}
     .join('\n')
   const relatedBlock = related ? `\n可能相关的笔记（只作参考，不要编造内容）：\n${related}\n` : ''
 
+  if (mode === 'polish-doc-chunk') {
+    return [
+      { role: 'system', content: SYSTEM },
+      {
+        role: 'user',
+        content: `${head}
+
+这是整篇文章的一部分。请只润色这一段，直接输出处理后的 Markdown：
+- 保留本段事实、数字、链接、图片、表格和代码块
+- 保留本段已有的标题层级，不要添加文章级一级标题
+- 段落拆短，列表统一用「- 」，删除重复和口水话
+- 保留 [[双链]]、#标签、图片语法和代码围栏
+- 不要输出解释、前言、结语，也不要用 \`\`\`markdown 包住内容
+
+片段：
+<<<
+${ctx.selection}
+>>>`,
+      },
+    ]
+  }
   if (mode === 'polish-doc') {
     return [
       { role: 'system', content: SYSTEM },

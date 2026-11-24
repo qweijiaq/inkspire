@@ -81,7 +81,7 @@ export function HealthModal({ docs, onOpenDoc, onOpenGraph, onClose }: Props) {
         const key = `${doc.id}:${link.target.toLowerCase()}`
         if (seenBroken.has(key)) continue
         seenBroken.add(key)
-        const line = Math.max(0, lines.slice(0, link.offset).length - 1)
+        const line = Math.max(0, body.slice(0, link.offset).split('\n').length - 1)
         broken.push({
           key,
           kind: 'broken',

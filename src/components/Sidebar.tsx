@@ -17,7 +17,14 @@ interface Props {
   onOpenImport: () => void
   onOpenGraph: () => void
   onRenameFolder: (path: string, name: string) => Promise<void>
+  /** 文件树操作前先让编辑器落盘，避免拖动/改名丢掉最后一段输入 */
+  onFlush?: () => Promise<unknown>
 }
+
+type DropHint =
+  | { kind: 'doc'; path: string; pos: 'before' | 'after' }
+  | { kind: 'folder'; path: string }
+  | null
 
 interface FolderNode {
   name: string
@@ -65,7 +72,7 @@ function highlight(text: string, start: number, length: number) {
   )
 }
 
-export function Sidebar({ onOpenDoc, onNewDoc, onOpenImport, onOpenGraph, onRenameFolder }: Props) {
+export function Sidebar({ onOpenDoc, onNewDoc, onOpenImport, onOpenGraph, onRenameFolder, onFlush }: Props) {
   const state = useVault()
   const [query, setQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
@@ -83,6 +90,8 @@ export function Sidebar({ onOpenDoc, onNewDoc, onOpenImport, onOpenGraph, onRena
   const [semanticMessage, setSemanticMessage] = useState('')
   const [moving, setMoving] = useState<Document | null>(null)
   const [moveTarget, setMoveTarget] = useState('')
+  const [dragging, setDragging] = useState<string | null>(null)
+  const [dropHint, setDropHint] = useState<DropHint>(null)
   const folderRef = useRef<HTMLDivElement | null>(null)
   const moveRef = useRef<HTMLDivElement | null>(null)
   const folderRenameRef = useRef<HTMLDivElement | null>(null)
@@ -202,8 +211,28 @@ const moveFolderOptions = [
   }
 
   const commitRename = async (doc: Document) => {
-    if (renameValue.trim() && renameValue.trim() !== doc.path) await vault.rename(doc.id, renameValue.trim())
+    if (renameValue.trim() && renameValue.trim() !== doc.path) {
+      await onFlush?.()
+      await vault.rename(doc.id, renameValue.trim())
+    }
     setRenaming(null)
+  }
+
+  const openOrCreateLink = async (raw: string) => {
+    const target = state.docs.find((d) => d.title.toLowerCase() === raw.trim().toLowerCase())
+    if (target) {
+      onOpenDoc(target.id)
+      return
+    }
+    const title = raw.trim()
+    if (!title) return
+    const name = title.replace(/[\\/:*?"<>|]/g, ' ').replace(/^\/+|\/+$/g, '') || '未命名'
+    const doc = await vault.createDoc({
+      title,
+      path: `${name}.md`,
+      content: `# ${title}\n\n> 这是一条尚未存在的链接，现在它有了自己的位置。\n`,
+    })
+    onOpenDoc(doc.id)
   }
 
   const newDocInFolder = async (folder: string) => {
@@ -227,11 +256,14 @@ const moveFolderOptions = [
     if (!moving) return
     const name = moving.path.split('/').pop() ?? moving.path
     const next = moveTarget ? `${moveTarget}/${name}` : name
-    if (next !== moving.path) await vault.rename(moving.id, next)
+    if (next !== moving.path) {
+      await onFlush?.()
+      await vault.rename(moving.id, next)
+    }
     setMoving(null)
   }
 
-  const renderDoc = (doc: Document, prefix = '') => {
+  const renderDoc = (doc: Document, prefix = '', sortable = true) => {
     const isActive = doc.id === state.activeId
     if (renaming === doc.id) {
       return (
@@ -253,11 +285,12 @@ const moveFolderOptions = [
     }
     return (
       <div
-        className={`tree-row${isActive ? ' active' : ''}`}
+        className={`tree-row${isActive ? ' active' : ''}${dropHint?.kind === 'doc' && dropHint.path === doc.path ? ` drop-${dropHint.pos}` : ''}${dragging === doc.id ? ' dragging' : ''}`}
         key={`${prefix}${doc.id}`}
         role="treeitem"
         aria-selected={isActive}
         tabIndex={0}
+        draggable={sortable}
         onClick={() => onOpenDoc(doc.id)}
         onDoubleClick={() => startRename(doc)}
         onKeyDown={(e) => {
@@ -265,6 +298,42 @@ const moveFolderOptions = [
             e.preventDefault()
             onOpenDoc(doc.id)
           }
+        }}
+        onDragStart={(e) => {
+          if (!sortable) return
+          e.stopPropagation()
+          setDragging(doc.id)
+          e.dataTransfer.effectAllowed = 'move'
+          e.dataTransfer.setData('text/plain', doc.id)
+        }}
+        onDragEnd={() => {
+          setDragging(null)
+          setDropHint(null)
+        }}
+        onDragOver={(e) => {
+          if (!dragging || dragging === doc.id) return
+          e.preventDefault()
+          e.stopPropagation()
+          e.dataTransfer.dropEffect = 'move'
+          const rect = e.currentTarget.getBoundingClientRect()
+          setDropHint({ kind: 'doc', path: doc.path, pos: e.clientY > rect.top + rect.height / 2 ? 'after' : 'before' })
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropHint(null)
+        }}
+        onDrop={(e) => {
+          if (!dragging) return
+          e.preventDefault()
+          e.stopPropagation()
+          const rect = e.currentTarget.getBoundingClientRect()
+          const after = e.clientY > rect.top + rect.height / 2
+          const id = dragging
+          setDragging(null)
+          setDropHint(null)
+          void (async () => {
+            await onFlush?.()
+            await vault.reorderDoc(id, doc.id, after)
+          })()
         }}
         data-tip={doc.path}
       >
@@ -312,7 +381,14 @@ const moveFolderOptions = [
 
   const renderNode = (node: FolderNode, depth = 0) => {
     const folders = [...node.folders.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh'))
-    const docs = node.docs.sort((a, b) => b.updatedAt - a.updatedAt)
+    const docs = [...node.docs].sort((a, b) => {
+      const oa = state.treeOrder[a.path]
+      const ob = state.treeOrder[b.path]
+      if (oa !== undefined && ob !== undefined) return oa - ob
+      if (oa !== undefined) return -1
+      if (ob !== undefined) return 1
+      return b.updatedAt - a.updatedAt
+    })
     return (
       <>
         {folders.map((f) => {
@@ -320,7 +396,7 @@ const moveFolderOptions = [
           return (
             <div key={f.path}>
               <div
-                className="tree-row folder-row"
+                className={`tree-row folder-row${dropHint?.kind === 'folder' && dropHint.path === f.path ? ' drop-inside' : ''}`}
                 role="treeitem"
                 aria-expanded={!isCollapsed}
                 tabIndex={0}
@@ -330,6 +406,28 @@ const moveFolderOptions = [
                     e.preventDefault()
                     toggleFolder(f.path)
                   }
+                }}
+                onDragOver={(e) => {
+                  if (!dragging) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  e.dataTransfer.dropEffect = 'move'
+                  setDropHint({ kind: 'folder', path: f.path })
+                }}
+                onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropHint(null)
+                }}
+                onDrop={(e) => {
+                  if (!dragging) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  const id = dragging
+                  setDragging(null)
+                  setDropHint(null)
+                  void (async () => {
+                    await onFlush?.()
+                    await vault.moveDocToFolder(id, f.path)
+                  })()
                 }}
               >
                 <span className="fic"><Icon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={14} /></span>
@@ -401,7 +499,7 @@ const moveFolderOptions = [
                 <div className="side-section-title" style={{ paddingTop: 2 }}>
                   收藏
                 </div>
-                {favorites.map((d) => renderDoc(d, 'fav-'))}
+                {favorites.map((d) => renderDoc(d, 'fav-', false))}
               </>
             )}
             {recent.length > 1 && (
@@ -418,7 +516,32 @@ const moveFolderOptions = [
                 </div>
               </>
             )}
-            <div className="side-section-title" style={{ paddingTop: 2 }}>
+            <div
+              className={`side-section-title${dropHint?.kind === 'folder' && dropHint.path === '' ? ' drop-root' : ''}`}
+              style={{ paddingTop: 2 }}
+              onDragOver={(e) => {
+                if (!dragging) return
+                e.preventDefault()
+                e.stopPropagation()
+                e.dataTransfer.dropEffect = 'move'
+                setDropHint({ kind: 'folder', path: '' })
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropHint(null)
+              }}
+              onDrop={(e) => {
+                if (!dragging) return
+                e.preventDefault()
+                e.stopPropagation()
+                const id = dragging
+                setDragging(null)
+                setDropHint(null)
+                void (async () => {
+                  await onFlush?.()
+                  await vault.moveDocToFolder(id, '')
+                })()
+              }}
+            >
               全部文档 <span style={{ fontWeight: 600 }}>{state.docs.length}</span>
             </div>
             {state.docs.length ? renderNode(tree) : <div className="empty-hint">还没有文档，点上面的「新建」或拖个文件进来。</div>}
@@ -587,12 +710,11 @@ const moveFolderOptions = [
                       className="link-card"
                       role="button"
                       tabIndex={0}
-                      onClick={() => (target ? onOpenDoc(target.id) : vault.flash('这篇笔记还不存在', 'info'))}
+                      onClick={() => void openOrCreateLink(l.target)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault()
-                          if (target) onOpenDoc(target.id)
-                          else vault.flash('这篇笔记还不存在', 'info')
+                          void openOrCreateLink(l.target)
                         }
                       }}
                     >

@@ -457,6 +457,9 @@ export default function App() {
             await editorRef.current?.flush()
             await vault.renameFolder(path, name)
           }}
+          onFlush={async () => {
+            await editorRef.current?.flush()
+          }}
         />
         {mobileOpen && <div className="drawer-mask" onClick={() => setMobileOpen(false)} />}
 
