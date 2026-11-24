@@ -1,0 +1,14 @@
+node_modules
+src-tauri/target
+src-tauri/gen/schemas
+dist
+*.tsbuildinfo
+.alma-snapshots
+.DS_Store
+.env
+.env.*
+*.pem
+
+# 本地产品 / 设计文档，不随代码仓库提交
+/local-docs/
+/AGENTS.md

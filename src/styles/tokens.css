@@ -1,0 +1,128 @@
+/* ============================================================
+   Inkspire 设计令牌（唯一真相源，对齐 UI 规范 §3）
+   ============================================================ */
+:root {
+  --paper: #fcf8f0;
+  --paper-2: #f6efe0;
+  --card: #ffffff;
+  --ink: #2e2a3e;
+  --ink-soft: #6c6680;
+  --ink-faint: #6f6885;
+  --brand: #5a52c9;
+  --brand-2: #7b72e8;
+  --brand-soft: #eeeafe;
+  --coral: #ff7a66;
+  --coral-soft: #ffe7e1;
+  /* 语义色的文字安全版：原色只做底色/描边，正文与图标文字必须用 -strong（对比度 ≥4.5:1） */
+  --coral-strong: #b93a26;
+  --mint: #2fb79a;
+  --mint-soft: #ddf5ee;
+  --mint-strong: #0a6f5d;
+  --yellow: #ffc24a;
+  --yellow-soft: #fff1d6;
+  --yellow-strong: #8a5a00;
+  --on-yellow: #2e2a3e;
+  --on-brand: #ffffff;
+  --on-coral: #2a0d09;
+  --on-mint: #08231d;
+  --pink: #ff8fb4;
+  --pink-soft: #ffe6ef;
+  --line: #2e2a3e;
+  --line-soft: #e7dfce;
+  --mm-body: #4e4796;
+  --mm-body-2: #6b63c4;
+  --mm-belly: #8b83d6;
+  --mm-eye: #ffffff;
+  --mm-mouth: #ff7a66;
+  --mm-tongue: #ff9ec0;
+  --mm-blush: #ff8fb4;
+  --shadow: 0 6px 0 var(--ink);
+  --shadow-sm: 0 3px 0 var(--ink);
+  --font: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --serif: 'Songti SC', 'Noto Serif SC', Georgia, serif;
+  --mono: 'SF Mono', ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace;
+  --r: 16px;
+  --editor-width: 760px;
+  --editor-size: 16px;
+  --code-bg: #f7f2e6;
+  /* 代码块语法色（亮色）；夜间在下方整套替换，避免固定色在深底上发灰 */
+  --code-keyword: #7c3aed;
+  --code-string: #0e8a63;
+  --code-comment: #7d778c;
+  --code-number: #b45309;
+  --code-function: #1d4ed8;
+  --code-type: #b0298a;
+  --code-operator: #8a5a1b;
+  --code-property: #0f766e;
+  --code-tag: #c2410c;
+  --code-heading: #4e4796;
+}
+
+[data-theme='night'] {
+  --paper: #1a1830;
+  --paper-2: #232044;
+  --card: #272349;
+  --ink: #f2eeff;
+  --ink-soft: #aba4cc;
+  --ink-faint: #a69ec9;
+  --brand: #a99dff;
+  --brand-2: #8b7ff0;
+  --brand-soft: #322c5c;
+  --coral: #ff8e7c;
+  --coral-soft: #4a2c3a;
+  --coral-strong: #ffb3a3;
+  --mint: #4fd9b8;
+  --mint-soft: #20463f;
+  --mint-strong: #6ee7c8;
+  --yellow: #ffd36b;
+  --yellow-soft: #4a3b20;
+  --yellow-strong: #ffd36b;
+  --on-yellow: #2e2a3e;
+  --on-brand: #16142a;
+  --on-coral: #2a0d09;
+  --on-mint: #08231d;
+  --pink: #ffa6c4;
+  --pink-soft: #4a2c40;
+  --line: #0f0d1e;
+  --line-soft: #38325c;
+  --code-bg: #211d3e;
+  --code-keyword: #c4b5fd;
+  --code-string: #6ee7b7;
+  --code-comment: #9a93b8;
+  --code-number: #fdba74;
+  --code-function: #93c5fd;
+  --code-type: #f0abfc;
+  --code-operator: #fcd34d;
+  --code-property: #5eead4;
+  --code-tag: #fdba74;
+  --code-heading: #c4b5fd;
+  --shadow: 0 6px 0 var(--line);
+  --shadow-sm: 0 3px 0 var(--line);
+}
+
+
+/* 间距与层级令牌（组件优先引用，不写裸值） */
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --z-panel: 10;
+  --z-sticky: 20;
+  --z-pet: 35;
+  --z-drawer: 40;
+  --z-sheet: 40;
+  --z-selection: 45;
+  --z-mask: 50;
+  --z-modal: 60;
+  --z-popover: 65;
+  --z-menu: 65;
+  --z-confirm: 70;
+  --z-toast: 80;
+  --z-tooltip: 90;
+  --z-library: 60;
+}
