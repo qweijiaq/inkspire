@@ -1045,7 +1045,8 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
       mode: 'rewrite',
       title: '全文润色排版',
       text: '',
-      original: protectedBody.text,
+      original: body,
+      displayOriginal: protectedBody.text,
       streaming: true,
       range: { from: full.length - body.length, to: full.length },
       sources: [{ docId: doc.id, title: doc.title, line: 0, excerpt: '整篇正文' }],
@@ -1733,7 +1734,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
     vault.setAiBusy(false)
   }
 
-  const acceptSuggestion = () => {
+  const acceptSuggestion = async () => {
     const view = viewRef.current
     if (!view || !suggestion) return
     const text = suggestion.text.trim()
@@ -1752,8 +1753,13 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
         return
       }
       if (suggestion.original && full.slice(range.from, range.to) !== suggestion.original) {
-        vault.flash('生成建议后选区内容已改动，已停止写入以免覆盖新内容', 'error')
-        return
+        const ok = await confirmDialog({
+          title: '选区内容已变化',
+          message: '建议生成后选区内容有改动。仍然写入会用 AI 结果覆盖当前选区，确定继续吗？',
+          confirmText: '仍然覆盖',
+          danger: true,
+        })
+        if (!ok) return
       }
     }
     if (suggestion.mode === 'rewrite' && range) {
@@ -2074,10 +2080,10 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
           <div className="ai-sheet-head">
             <Momo mood={suggestion.streaming ? 'thinking' : 'happy'} className="momo-mini" />
             <span>墨墨 · {suggestion.title}</span>
-            {suggestion.original && <span style={{ fontWeight: 600, opacity: 0.7 }}>（将替换选区）</span>}
+            {(suggestion.displayOriginal ?? suggestion.original) && <span style={{ fontWeight: 600, opacity: 0.7 }}>（将替换选区）</span>}
             {suggestion.original && !suggestion.streaming && (
               <span className="ai-diff-stat">
-                <b>+{suggestion.text.length}</b> / <em>-{suggestion.original.length}</em> 字符
+                <b>+{suggestion.text.length}</b> / <em>-{(suggestion.displayOriginal ?? suggestion.original ?? '').length}</em> 字符
               </span>
             )}
             <span className="grow" />
@@ -2085,9 +2091,9 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
             <button onClick={() => { abortRef.current?.abort(); setSuggestion(null) }}>esc 关闭</button>
           </div>
           <div className="ai-body">
-            {suggestion.original && suggestion.streaming && <span className="orig">{suggestion.original}</span>}
+            {suggestion.original && suggestion.streaming && <span className="orig">{suggestion.displayOriginal ?? suggestion.original}</span>}
             {suggestion.original && !suggestion.streaming ? (
-              <DiffView before={suggestion.original} after={suggestion.text} className="ai-diff" />
+              <DiffView before={suggestion.displayOriginal ?? suggestion.original ?? ''} after={suggestion.text} className="ai-diff" />
             ) : (
               <span className={suggestion.streaming ? 'ai-cursor' : ''}>{suggestion.text || '…'}</span>
             )}
@@ -2112,7 +2118,7 @@ export const EditorPane = forwardRef<EditorHandle, Props>(function EditorPane(
             )}
           </div>
           <div className="ai-actions">
-            <button className="tbtn primary" disabled={suggestion.streaming || !suggestion.text.trim() || !!suggestion.error} onClick={acceptSuggestion}>
+            <button className="tbtn primary" disabled={suggestion.streaming || !suggestion.text.trim() || !!suggestion.error} onClick={() => void acceptSuggestion()}>
               <Icon name="check" size={15} /> 采纳
             </button>
             <button className="tbtn" onClick={discardSuggestion}>丢弃</button>

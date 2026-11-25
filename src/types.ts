@@ -244,6 +244,8 @@ export interface AISuggestion {
   title: string
   text: string
   original?: string
+  /** 用于 diff 展示的原文（可能已把图片压成占位符），不用于覆盖校验 */
+  displayOriginal?: string
   streaming: boolean
   error?: string
   range?: { from: number; to: number }

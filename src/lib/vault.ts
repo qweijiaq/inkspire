@@ -1325,18 +1325,14 @@ export class Vault {
       if (!latestVersions.some((x) => x.id === version.id)) latestVersions.push(version)
     }
     while (latestVersions.length > 40) latestVersions.shift()
-    const contentStillCurrent = latest.content === content
+    // 保存队列按文档串行；本次写入就是最新内容，不能因为内存里的旧快照而丢弃正文。
     const next: Document = {
       ...latest,
-      ...(contentStillCurrent
-        ? {
-            content,
-            frontMatter: fm,
-            title: deriveTitle(content, doc.path),
-            wordCount: countWords(content),
-            preview: makePreview(content),
-          }
-        : {}),
+      content,
+      frontMatter: fm,
+      title: deriveTitle(content, doc.path),
+      wordCount: countWords(content),
+      preview: makePreview(content),
       updatedAt,
       versions: latestVersions,
     }
